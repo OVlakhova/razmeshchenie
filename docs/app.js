@@ -4,8 +4,10 @@
 
 const API = window.RAZM_API ||
   'https://script.google.com/macros/s/AKfycbxzKklN_XquWi7e9ZKml2iGv7lnRI_gpab86hkXPs7SxT-FT3N4hD2cqfMTwvAksUxyPw/exec';
-const APP_VERSION = '1.6';
-const CATALOG_EVERY_MS = 10 * 60 * 1000;
+const APP_VERSION = '1.7';
+const CATALOG_EVERY_MS = 10 * 60 * 1000;     // пока приложение открыто — обновлять справочник раз в 10 минут
+const CATALOG_STALE_MS = 30 * 60 * 1000;     // старше — кнопка «Справочник» жёлтая
+const RECENT_MS = 30 * 60 * 1000;            // свои пики помним 30 минут и накладываем поверх свежего справочника
 const SYNC_EVERY_MS = 5000;
 const DOUBLE_SCAN_MS = 1500;
 const HOLD_MS = 2000;
@@ -90,7 +92,8 @@ const S = {
   queued: 0, online: navigator.onLine, syncing: false, problems: [],
   tableErr: '', table: '', busy: false,
   lastActivity: 0,             // время последнего действия — для сброса ячейки после перерыва
-  pkgByCode: {},               // упаковка, выбранная на этой полке для штрихкода (для 2-го, 3-го экземпляра)
+  pkgByCode: {},
+  recent: {},                  // штрихкод -> {cell, at}: свои недавние пики (справочник с сервера мог их ещё не увидеть)               // упаковка, выбранная на этой полке для штрихкода (для 2-го, 3-го экземпляра)
   lastScan: { code: '', at: 0 },
   pendingMove: null, pendingUnknown: null,
 };
@@ -131,8 +134,14 @@ async function api(method, params, body) {
   return j;
 }
 
-async function loadCatalog(force) {
-  if (!force && S.catalogAt && Date.now() - Date.parse(S.catalogAt) < CATALOG_EVERY_MS) return;
+let catalogLoading = null;
+/** force — обновить сейчас; иначе только если справочник старше maxAge (по умолчанию 10 минут). */
+function loadCatalog(force, maxAge) {
+  if (!force && S.catalogAt && Date.now() - Date.parse(S.catalogAt) < (maxAge || CATALOG_EVERY_MS)) return Promise.resolve(true);
+  if (!catalogLoading) catalogLoading = fetchCatalog().finally(() => { catalogLoading = null; });
+  return catalogLoading;
+}
+async function fetchCatalog() {
   try {
     const j = await api('GET', { action: 'catalog' });
     S.catalog = j.books || {}; S.packages = j.packages || []; S.catalogAt = j.version || new Date().toISOString();
@@ -159,6 +168,7 @@ async function sync() {
       if (!['ok', 'уже получено', 'отменено'].includes(r.result)) {
         const ev = batch.find(e => e.id === r.id) || {};
         const title = (S.catalog[ev.barcode] || {}).t || ev.barcode || '';
+        if (ev.barcode && S.recent[ev.barcode]) { delete S.recent[ev.barcode]; DB.set('recent', S.recent); }
         S.problems.unshift(`${title}: ${r.result}`);
         S.problems = S.problems.slice(0, 5);
       }
@@ -182,9 +192,20 @@ function netFail(e) {
 
 /** Пики, ещё не дошедшие до таблицы, должны оставаться видны в справочнике. */
 async function overlayQueue() {
+  const now = Date.now();
+  for (const b in S.recent) {
+    if (now - S.recent[b].at > RECENT_MS) { delete S.recent[b]; continue; }
+    if (S.catalog[b]) S.catalog[b].c = S.recent[b].cell;
+  }
   (await DB.qAll()).sort((a, b) => a.seq - b.seq).forEach(ev => {
     if (ev.type !== 'undo' && ev.barcode && S.catalog[ev.barcode]) S.catalog[ev.barcode].c = ev.cell;
   });
+}
+
+async function remember(barcode, cell) {
+  if (!barcode) return;
+  S.recent[barcode] = { cell: cell || '', at: Date.now() };
+  await DB.set('recent', S.recent);
 }
 
 let seq = Date.now();
@@ -306,7 +327,7 @@ async function startCurrent(code, book, type, warn) {
   if (type === 'move') { lbl = 'ПЕРЕМЕЩЕНИЕ · ' + S.cell; kind = 'warn'; }
   beep(needsPkg || warn ? 'warn' : 'ok');
   show(kind, lbl, '', book.t, meta, needsPkg ? 'Выберите упаковку' : warn);
-  renderPackages();
+  renderPackages(); renderShelf();
 }
 
 /** Поставить текущий пик в очередь. false — нельзя (не выбрана упаковка). */
@@ -322,6 +343,7 @@ async function commitCurrent() {
   await enqueue(c.ev);
   if (c.ev.pkg) { S.lastPkg = Object.assign({}, c.ev.pkg); S.pkgByCode[c.ev.barcode] = Object.assign({}, c.ev.pkg); }
   if (S.catalog[c.ev.barcode]) S.catalog[c.ev.barcode].c = c.ev.cell;
+  await remember(c.ev.barcode, c.ev.cell);
   S.shelf.unshift({ id: c.ev.id, barcode: c.ev.barcode, title: c.book.t, pkg: c.ev.pkg || c.fromTable, prevC: c.prevC });
   S.current = null;
   await DB.set('current', null);
@@ -335,6 +357,7 @@ async function choosePkg(p) {
     S.current.ev.pkg = Object.assign({}, p);
     S.current.needsPkg = false;
     S.current.touchedAt = S.lastActivity = Date.now();
+    renderShelf();
     await DB.set('current', S.current);
     show(stateKind(), $('stLbl').textContent, '', S.current.book.t, $('stMeta').textContent, '');
   } else if (S.editShelf) {      // исправить упаковку уже поставленной книги
@@ -369,13 +392,14 @@ async function undo() {
     const t = S.current.book.t;
     S.current = null; await DB.set('current', null);
     await saveSession();
-    renderPackages();
+    renderPackages(); renderShelf();
     return show('gray', 'ОТМЕНЕНО', '', t, 'Пик удалён, в таблицу ничего не ушло');
   }
   const last = S.shelf.shift();
   if (!last) { S.lastUndoAt = 0; return show('gray', 'НЕЧЕГО ОТМЕНЯТЬ', '', '', ''); }
   S.counts[last.barcode] = Math.max(0, (S.counts[last.barcode] || 1) - 1);
   if (S.catalog[last.barcode]) S.catalog[last.barcode].c = last.prevC;
+  await remember(last.barcode, last.prevC);
   const q = await DB.qAll();
   if (q.find(e => e.id === last.id)) await DB.qDel(last.id);       // ещё не отправлен — просто удалить
   else await enqueue({ id: uid(), ts: new Date().toISOString(), type: 'undo', undoOf: last.id });
@@ -402,6 +426,7 @@ async function shelfDone() {
   const left = S.queued;
   show(left ? 'warn' : 'ok', 'ПОЛКА ГОТОВА', cell, `${n} ${plural(n, 'книга', 'книги', 'книг')}`,
        left ? `Ждут отправки: ${left}. Отправятся сами, когда будет сеть — приложение не удаляйте.` : 'Всё отправлено в таблицу. Можно уходить.');
+  loadCatalog(true);                                  // пауза между полками — обновить справочник
 }
 
 function plural(n, one, few, many) {
@@ -481,6 +506,7 @@ function renderTop() {
   const test = /тест/i.test(S.table || '');
   $('infobar').classList.toggle('test', test);
   $('tblName').textContent = test ? 'ТЕСТОВАЯ ТАБЛИЦА' : (S.table || '');
+  $('catBtn').classList.toggle('stale', !S.busy && (!S.catalogAt || Date.now() - Date.parse(S.catalogAt) > CATALOG_STALE_MS));
   $('catBtn').textContent = S.busy ? 'Обновляю…' : `Справочник ${S.catalogAt ? hhmm(S.catalogAt) : '—'} ↻`;
 }
 
@@ -529,8 +555,17 @@ function renderPackages() {
 }
 
 function renderShelf() {
-  $('shelfCount').textContent = S.shelf.length;
+  $('shelfCount').textContent = S.shelf.length + (S.current ? 1 : 0);
   const box = $('shelf'); box.innerHTML = '';
+  if (S.current) {                 // открытая книга: ещё не записана, запишется следующим пиком
+    const row = document.createElement('div'); row.className = 'row cur';
+    const d = document.createElement('div');
+    const b = document.createElement('b'); b.textContent = S.current.book.t;
+    const s = document.createElement('span');
+    const p = S.current.ev.pkg || S.current.fromTable;
+    s.textContent = 'на экране — запишется следующим пиком' + (p ? ' · ' + pkgLabel(p) : ' · выберите упаковку');
+    d.append(b, s); row.append(d); box.appendChild(row);
+  }
   S.shelf.slice(0, 8).forEach(it => {
     const row = document.createElement('div'); row.className = 'row';
     const d = document.createElement('div');
@@ -679,11 +714,13 @@ function focusScan() {
 
 // ------------------------------------------------------------ запуск
 async function start() {
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});   // сразу: без него Chrome ставит ярлык, а не приложение
   await DB.open();
   try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) {}
   S.device = (await DB.get('device')) || uid(); await DB.set('device', S.device);
   const auth = await DB.get('auth');
   if (auth) { S.key = auth.key; S.user = auth.user; }
+  S.recent = await DB.get('recent') || {};
   const cat = await DB.get('catalog');
   if (cat) { S.catalog = cat.books || {}; S.packages = cat.packages || []; S.catalogAt = cat.at || ''; S.table = cat.table || ''; await overlayQueue(); }
   const sess = await DB.get('session');
@@ -706,13 +743,12 @@ function enterMain() {
   if (S.current) show('ok', 'ВОССТАНОВЛЕН ПОСЛЕДНИЙ ПИК', '', S.current.book.t, 'Пикните следующую книгу или отмените');
   else show('info', 'ГОТОВО', '', S.cell ? 'Ячейка ' + S.cell + ' — пикайте книги' : 'Пикните этикетку ячейки', '');
   focusScan();
-  loadCatalog(!S.catalogAt);
+  loadCatalog(true);                                  // при каждом открытии — свежий справочник
   sync();
   setInterval(sync, SYNC_EVERY_MS);
   setInterval(autoClose, 15 * 1000);
   autoClose();
   setInterval(() => loadCatalog(false), 60 * 1000);
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
 
 function bind() {
@@ -737,7 +773,7 @@ function bind() {
   });
   scan.addEventListener('blur', () => setTimeout(focusScan, 150));
   document.addEventListener('click', () => setTimeout(focusScan, 50));
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { focusScan(); autoClose().then(sync); } });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { focusScan(); autoClose().then(sync); loadCatalog(false, 60 * 1000); } });
   window.addEventListener('online', () => { S.online = true; sync(); loadCatalog(false); });
   window.addEventListener('offline', () => { S.online = false; renderTop(); });
 

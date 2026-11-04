@@ -24,7 +24,7 @@ BOOKS = {
   "9785991035781": {"t": "Старая из 1С", "a": "Б", "s": {"1c": "С17-П4", "arch": "С17-П4"}, "f": 1, "ar": "С17-П4_9785991035781"},
 }
 posted = []
-NET = {"down": False, "tableErr": ""}
+NET = {"down": False, "tableErr": "", "catVersion": "2026-11-04T09:00:00Z", "lag": False, "catalogGets": 0}
 
 def handle(route, request):
     if NET["down"]:
@@ -36,12 +36,13 @@ def handle(route, request):
         if 'action=ping' in q:
             return route.fulfill(status=200, content_type='application/json', body=json.dumps({"ok": True, "user": "Ольга"}))
         # как настоящая таблица: принятые пики уже записаны в «Место хранения»
+        NET["catalogGets"] += 1
         books = json.loads(json.dumps(BOOKS))
-        for e in posted:
+        for e in ([] if NET["lag"] else posted):
             if e.get('type') in ('place', 'move') and e.get('barcode') in books and books[e['barcode']].get('n'):
                 books[e['barcode']]['c'] = e['cell']
         return route.fulfill(status=200, content_type='application/json',
-                             body=json.dumps({"ok": True, "version": "2026-11-04T09:00:00Z", "table": "ТЕСТ OzonBooks", "packages": PK, "books": books}))
+                             body=json.dumps({"ok": True, "version": NET["catVersion"], "table": "ТЕСТ OzonBooks", "packages": PK, "books": books}))
     body = json.loads(request.post_data)
     if NET["tableErr"]:
         return route.fulfill(status=200, content_type='application/json', body=json.dumps({"ok": False, "error": NET["tableErr"]}))
@@ -126,9 +127,7 @@ with sync_playwright() as p:
     page.click('#moveNo'); page.wait_for_timeout(100)
 
     page.click('#undoBtn'); page.wait_for_timeout(200)
-    check('ОТМЕНИТЬ ЕЩЁ ОДНУ?' in st(), 'вторая отмена подряд просит подтверждения: ' + st().replace('\n', ' | '))
-    page.click('#undoBtn'); page.wait_for_timeout(200)
-    check('ОТМЕНЕНО' in st(), 'отмена последнего после подтверждения')
+    check('ОТМЕНЕНО' in st(), 'отмена последнего (между отменами был пик — подтверждение не нужно)')
 
     # без сети
     ctx.set_offline(True); NET["down"] = True
@@ -209,7 +208,7 @@ with sync_playwright() as p:
     scan('2000000311845'); page.wait_for_timeout(300)
     page.locator('#pkgGrid button', has_text='201·2').click(); page.wait_for_timeout(150)
     page.reload(); page.wait_for_timeout(1200)
-    check(page.inner_text('#cellName') == 'С19-П2' and page.inner_text('#shelfCount') == '1' and 'Книга с габаритами' in page.inner_text('#shelf'),
+    check(page.inner_text('#cellName') == 'С19-П2' and page.inner_text('#shelfCount') == '2' and 'Книга с габаритами' in page.inner_text('#shelf'),
           'после обновления страницы список полки на месте: ' + page.inner_text('#shelfCount'))
     check('ВОССТАНОВЛЕН' in st() and 'Третья книга' in st(), 'после обновления последний пик восстановлен')
     page.click('#doneBtn'); page.wait_for_timeout(1500)
@@ -238,6 +237,42 @@ with sync_playwright() as p:
     NET["tableErr"] = ""
     page.wait_for_timeout(6000)
     check('всё отправлено' in page.inner_text('#sync'), 'после исправления таблицы очередь ушла')
+
+    # вторая отмена подряд — с подтверждением (как было с «Танец. Мысль. Время»)
+    page.wait_for_timeout(1600)
+    scan('2000000311852'); page.wait_for_timeout(300)
+    check(page.locator('#shelf .row.cur').count() == 1 and 'на экране' in page.inner_text('#shelf .row.cur'), 'открытая книга видна в списке «на экране»')
+    cnt_open = page.inner_text('#shelfCount')
+    page.evaluate("window.scrollTo(0, document.body.scrollHeight)"); page.screenshot(path='/tmp/razm_cur.png')
+    page.locator('#pkgGrid button', has_text='Разв·5').click(); page.wait_for_timeout(150)
+    page.wait_for_timeout(1600)
+    scan('991019002'); page.wait_for_timeout(300)
+    check(page.inner_text('#shelfCount') == cnt_open, 'счётчик не меняется, когда открытая книга записалась: ' + cnt_open)
+    page.screenshot(path='/tmp/razm_open.png')
+    page.click('#undoBtn'); page.wait_for_timeout(200)
+    check('ОТМЕНЕНО' in st() and 'Книга без габаритов' in st(), 'первая отмена')
+    page.click('#undoBtn'); page.wait_for_timeout(200)
+    check('ОТМЕНИТЬ ЕЩЁ ОДНУ?' in st() and 'Книга с габаритами' in st(), 'вторая отмена подряд просит подтверждения: ' + st().replace('\n', ' | '))
+    page.click('#undoBtn'); page.wait_for_timeout(200)
+    check('ОТМЕНЕНО' in st() and 'Книга с габаритами' in st(), 'после подтверждения отменена')
+
+    # справочник: при открытии, после «Полка готова», устаревший — жёлтый, свои пики не теряются
+    check('stale' in (page.get_attribute('#catBtn', 'class') or ''), 'старый справочник подсвечен')
+    NET["catVersion"] = page.evaluate("new Date().toISOString()")
+    g0 = NET["catalogGets"]
+    page.reload(); page.wait_for_timeout(1500)
+    check(NET["catalogGets"] > g0, 'при открытии приложения справочник обновился')
+    check('stale' not in (page.get_attribute('#catBtn', 'class') or ''), 'свежий справочник не подсвечен')
+    NET["lag"] = True                   # таблица «ещё не видит» новые пики
+    scan('991019002'); page.wait_for_timeout(1600)
+    scan('2000000311869'); page.wait_for_timeout(300)
+    g1 = NET["catalogGets"]
+    page.click('#doneBtn'); page.wait_for_timeout(2500)
+    check(NET["catalogGets"] > g1, 'после «Полка готова» справочник обновился')
+    scan('991021002'); page.wait_for_timeout(1600)
+    scan('2000000311869'); page.wait_for_timeout(300)
+    check('УЖЕ РАЗМЕЩЕНА' in st() and 'С19-П2' in st(), 'свой свежий пик не потерялся после обновления справочника: ' + st().replace('\n', ' | '))
+    page.click('#moveNo'); NET["lag"] = False
 
     page.screenshot(path='/tmp/razm_e2e.png')
     check(not errors, 'нет ошибок JavaScript ' + (str(errors) if errors else ''))

@@ -1,6 +1,6 @@
 // Работа без сети: оболочка приложения хранится в кэше. Данные (справочник, очередь) — в IndexedDB.
-const VERSION = 'razm-v7';
-const SHELL = ['./', './index.html', './app.js', './manifest.webmanifest', './icon-192.png', './icon-512.png'];
+const VERSION = 'razm-v8';
+const SHELL = ['./', './index.html', './app.js', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable-512.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(VERSION).then(c => c.addAll(SHELL)).then(() => self.skipWaiting()));
