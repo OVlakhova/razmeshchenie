@@ -1,0 +1,583 @@
+'use strict';
+// Размещение книг по ячейкам — приложение для телефона.
+// Сканер работает как клавиатура: печатает код и Enter в скрытое поле.
+
+const API = window.RAZM_API ||
+  'https://script.google.com/macros/s/AKfycbzsrMDosDNc4HsdZyGS-WUeu7bUxzGh0HCho9dZJAC8_p163mjrFFPM3WCPH35hqQ_b/exec';
+const APP_VERSION = '1.0';
+const CATALOG_EVERY_MS = 10 * 60 * 1000;
+const SYNC_EVERY_MS = 5000;
+const DOUBLE_SCAN_MS = 1500;
+const HOLD_MS = 2000;
+
+// ------------------------------------------------------------ коды
+const Codes = {
+  norm: v => String(v == null ? '' : v).trim(),
+  ean13ok(s) {
+    if (!/^\d{13}$/.test(s)) return false;
+    let sum = 0;
+    for (let i = 0; i < 12; i++) sum += Number(s[i]) * (i % 2 ? 3 : 1);
+    return (10 - sum % 10) % 10 === Number(s[12]);
+  },
+  classify(raw) {
+    const s = Codes.norm(raw);
+    if (s === '991999999') return { kind: 'desk', code: s };
+    if (/^991\d{6}$/.test(s)) return { kind: 'cell', code: s, cell: Codes.cellName(s) };
+    if (/^\d{12,13}$/.test(s)) return { kind: 'book', code: s, checksumOk: s.length === 13 && Codes.ean13ok(s) };
+    return { kind: 'invalid', code: s };
+  },
+  cellName(code) {
+    const m = /^991(\d{3})(\d{3})$/.exec(code);
+    return m ? `С${Number(m[1])}-П${Number(m[2])}` : '';
+  },
+  /** "5-480-00056-Х" (ISBN-10, русская или латинская Х) -> EAN-13 */
+  isbn10to13(isbn) {
+    const s = String(isbn || '').toUpperCase().replace(/Х/g, 'X').replace(/[^0-9X]/g, '');
+    if (!/^\d{9}[\dX]$/.test(s)) return '';
+    const b = '978' + s.slice(0, 9);
+    let sum = 0;
+    for (let i = 0; i < 12; i++) sum += Number(b[i]) * (i % 2 ? 3 : 1);
+    return b + ((10 - sum % 10) % 10);
+  },
+  short(name) {  // "Развертка - 5 см." -> "Разв·5", "201 - 2 см." -> "201·2"
+    const m = /^(.+?)\s*-\s*(\d+)\s*см/.exec(name || '');
+    if (!m) return name || '';
+    return (m[1] === 'Развертка' ? 'Разв' : m[1]) + '·' + m[2];
+  }
+};
+
+// ------------------------------------------------------------ хранилище (IndexedDB)
+const DB = {
+  db: null,
+  open() {
+    return new Promise((res, rej) => {
+      const r = indexedDB.open('razm', 1);
+      r.onupgradeneeded = () => {
+        r.result.createObjectStore('kv');
+        r.result.createObjectStore('queue', { keyPath: 'id' });
+      };
+      r.onsuccess = () => { DB.db = r.result; res(); };
+      r.onerror = () => rej(r.error);
+    });
+  },
+  tx(store, mode, fn) {
+    return new Promise((res, rej) => {
+      const t = DB.db.transaction(store, mode);
+      const out = fn(t.objectStore(store));
+      t.oncomplete = () => res(out && out.result !== undefined ? out.result : undefined);
+      t.onerror = () => rej(t.error);
+    });
+  },
+  get: k => DB.tx('kv', 'readonly', s => s.get(k)),
+  set: (k, v) => DB.tx('kv', 'readwrite', s => s.put(v, k)),
+  qAll: () => DB.tx('queue', 'readonly', s => s.getAll()),
+  qPut: ev => DB.tx('queue', 'readwrite', s => s.put(ev)),
+  qDel: id => DB.tx('queue', 'readwrite', s => s.delete(id)),
+};
+
+// ------------------------------------------------------------ состояние
+const S = {
+  key: '', user: '', device: '',
+  mode: 'place',               // 'place' | 'find'
+  cell: '',                    // активная ячейка
+  catalog: {}, packages: [], catalogAt: '',
+  current: null,               // текущий пик, ещё не поставлен в очередь: {ev, book, needsPkg}
+  lastPkg: null,               // упаковка прошлой книги
+  shelf: [],                   // пики на текущей полке: {id, barcode, title, pkg, prevC, queued}
+  counts: {},                  // штрихкод -> сколько экземпляров пикнуто на этой полке
+  queued: 0, online: navigator.onLine, syncing: false, problems: [],
+  lastScan: { code: '', at: 0 },
+  pendingMove: null, pendingUnknown: null,
+};
+
+const $ = id => document.getElementById(id);
+const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+
+// ------------------------------------------------------------ звук и вибрация
+let audio;
+function beep(kind) {
+  try {
+    audio = audio || new (window.AudioContext || window.webkitAudioContext)();
+    const plan = { ok: [[880, .08]], warn: [[520, .1], [520, .1]], bad: [[220, .35]] }[kind] || [[660, .08]];
+    let t = audio.currentTime;
+    plan.forEach(([f, d]) => {
+      const o = audio.createOscillator(), g = audio.createGain();
+      o.frequency.value = f; g.gain.value = .15; o.connect(g); g.connect(audio.destination);
+      o.start(t); o.stop(t + d); t += d + .06;
+    });
+  } catch (e) { /* без звука */ }
+  try { navigator.vibrate && navigator.vibrate(kind === 'bad' ? [200, 80, 200] : kind === 'warn' ? [80, 60, 80] : 40); } catch (e) {}
+}
+
+// ------------------------------------------------------------ сеть
+async function api(method, params, body) {
+  const url = API + '?' + new URLSearchParams(Object.assign({ key: S.key }, params || {}));
+  const r = await fetch(url, method === 'GET' ? {} : {
+    method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(Object.assign({ key: S.key, device: S.device }, body))
+  });
+  const j = await r.json();
+  if (!j.ok) throw new Error(j.error || 'ошибка таблицы');
+  return j;
+}
+
+async function loadCatalog(force) {
+  if (!force && S.catalogAt && Date.now() - Date.parse(S.catalogAt) < CATALOG_EVERY_MS) return;
+  try {
+    const j = await api('GET', { action: 'catalog' });
+    S.catalog = j.books || {}; S.packages = j.packages || []; S.catalogAt = j.version || new Date().toISOString();
+    await overlayQueue();
+    await DB.set('catalog', { books: S.catalog, packages: S.packages, at: S.catalogAt });
+    renderPackages(); renderTop();
+  } catch (e) {
+    S.online = false; renderTop();
+  }
+}
+
+async function sync() {
+  if (S.syncing || !S.key) return;
+  const q = (await DB.qAll()).sort((a, b) => a.seq - b.seq);
+  S.queued = q.length; renderTop();
+  if (!q.length) return;
+  S.syncing = true;
+  try {
+    const batch = q.slice(0, 50).map(({ seq, ...ev }) => ev);
+    const j = await api('POST', {}, { events: batch });
+    for (const r of j.results || []) {
+      if (!['ok', 'уже получено', 'отменено'].includes(r.result)) {
+        const ev = batch.find(e => e.id === r.id) || {};
+        const title = (S.catalog[ev.barcode] || {}).t || ev.barcode || '';
+        S.problems.unshift(`${title}: ${r.result}`);
+        S.problems = S.problems.slice(0, 5);
+      }
+      await DB.qDel(r.id);
+    }
+    S.online = true;
+  } catch (e) {
+    S.online = false;
+  } finally {
+    S.syncing = false;
+    S.queued = (await DB.qAll()).length;
+    renderTop(); renderProblems();
+  }
+}
+
+/** Пики, ещё не дошедшие до таблицы, должны оставаться видны в справочнике. */
+async function overlayQueue() {
+  (await DB.qAll()).sort((a, b) => a.seq - b.seq).forEach(ev => {
+    if (ev.type !== 'undo' && ev.barcode && S.catalog[ev.barcode]) S.catalog[ev.barcode].c = ev.cell;
+  });
+}
+
+let seq = Date.now();
+async function enqueue(ev) {
+  ev.seq = seq++;
+  await DB.qPut(ev);
+  S.queued++; renderTop();
+}
+
+// ------------------------------------------------------------ упаковки
+function pkgByDims(d) {
+  if (!d) return null;
+  const p = S.packages.find(p => !p.manual && p.L === d[0] && p.W === d[1] && p.H === d[2]);
+  return p ? { name: p.name, L: p.L, W: p.W, H: p.H } : { name: 'Ручная', L: d[0], W: d[1], H: d[2] };
+}
+
+function pkgLabel(p) {
+  if (!p) return '';
+  return p.name === 'Ручная' ? `Ручная ${p.L}×${p.W}×${p.H}` : Codes.short(p.name);
+}
+
+// ------------------------------------------------------------ сканы
+async function onScan(raw) {
+  const code = Codes.classify(raw);
+  const now = Date.now();
+  if (code.code === S.lastScan.code && now - S.lastScan.at < DOUBLE_SCAN_MS) return;  // двойной пик
+  S.lastScan = { code: code.code, at: now };
+  hideActions();
+  const accepted = await handleScan(code);
+  if (!accepted) S.lastScan = { code: '', at: 0 };   // отклонённый пик можно сразу повторить
+}
+
+/** true — пик принят; false — отклонён (повторный пик того же кода не считается двойным). */
+async function handleScan(code) {
+
+  if (code.kind === 'invalid') {
+    show('bad', 'НЕКОРРЕКТНЫЙ КОД', '', `«${code.code}» — это не штрихкод`, 'Пик не принят');
+    return false;
+  }
+  if (code.kind === 'desk') { await setMode('find'); return true; }
+  if (S.mode === 'find') { code.kind === 'cell' ? showFindCell(code) : showFind(code); return true; }
+
+  if (code.kind === 'cell') {
+    if (!await commitCurrent()) return false;
+    if (S.cell !== code.cell) { S.cell = code.cell; S.shelf = []; S.counts = {}; }
+    await DB.set('session', { cell: S.cell, lastPkg: S.lastPkg });
+    beep('ok');
+    render();
+    show('info', 'ЯЧЕЙКА', '', code.cell, 'Пикайте книги, которые ставите на эту полку');
+    return true;
+  }
+
+  // книга
+  if (!S.cell) { beep('bad'); show('bad', 'СНАЧАЛА ЯЧЕЙКА', '', 'Пикните этикетку ячейки', 'Книга не записана'); return false; }
+  if (!await commitCurrent()) return false;
+  const book = S.catalog[code.code];
+  const warn = code.checksumOk || code.code.length !== 13 ? '' : 'Проверьте штрихкод: контрольная цифра не сходится';
+
+  if (!book) {
+    S.pendingUnknown = code.code;
+    beep('bad');
+    show('bad', 'НЕИЗВЕСТНЫЙ ШТРИХКОД', '', code.code, 'Нет в справочнике. Отложите книгу или сохраните — таблица проверит при отправке.');
+    $('unknownActions').classList.remove('hidden');
+    return false;
+  }
+  if (!book.n) {   // не новая книга: есть только в архиве или 1С
+    const where = book.s['1c'] || book.s.arch || '—';
+    beep('warn');
+    show('gray', 'НЕ НОВАЯ КНИГА', 'Место: ' + where, book.t, [book.a, 'новые книги ставятся из «Лист1»'].filter(Boolean).join(' · '));
+    return false;
+  }
+  if (book.c && book.c !== S.cell) {
+    S.pendingMove = { code, book };
+    beep('bad');
+    show('bad', 'УЖЕ РАЗМЕЩЕНА', 'на ' + book.c, book.t, 'Эту книгу на эту полку не ставим. Артикул остаётся прежним.');
+    $('moveActions').classList.remove('hidden');
+    $('moveNo').textContent = `Понятно, отнесу на ${book.c}`;
+    return false;
+  }
+  await startCurrent(code, book, 'place', warn);
+  return true;
+}
+
+async function startCurrent(code, book, type, warn) {
+  const fromTable = pkgByDims(book.d);
+  const ev = { id: uid(), ts: new Date().toISOString(), type, cell: S.cell, barcode: code.code, pkg: null };
+  let needsPkg = false;
+  if (!fromTable) {
+    if (S.lastPkg) ev.pkg = Object.assign({}, S.lastPkg); else needsPkg = true;
+  }
+  S.counts[code.code] = (S.counts[code.code] || 0) + 1;
+  S.current = { ev, book, needsPkg, fromTable, prevC: book.c || '' };
+  await DB.set('current', S.current);
+  const n = S.counts[code.code], q = book.q || 1;
+  let lbl = book.c === S.cell ? 'УЖЕ НА ЭТОЙ ПОЛКЕ' : 'НОВОЕ МЕСТО · ' + S.cell, kind = 'ok';
+  let meta = [book.a, code.code].filter(Boolean).join(' · ');
+  if (q > 1) { lbl = `ЭКЗЕМПЛЯР ${n} ИЗ ${q}`; kind = 'info'; meta = n < q ? `Пикните ещё ${q - n} — они должны стоять здесь же` : 'Все экземпляры на месте'; }
+  if (n > q) { lbl = `ЭКЗЕМПЛЯР ${n}, А В ТАБЛИЦЕ ${q}`; kind = 'warn'; }
+  if (type === 'move') { lbl = 'ПЕРЕМЕЩЕНИЕ · ' + S.cell; kind = 'warn'; }
+  beep(needsPkg || warn ? 'warn' : 'ok');
+  show(kind, lbl, '', book.t, meta, needsPkg ? 'Выберите упаковку' : warn);
+  renderPackages();
+}
+
+/** Поставить текущий пик в очередь. false — нельзя (не выбрана упаковка). */
+async function commitCurrent() {
+  const c = S.current;
+  if (!c) return true;
+  if (c.needsPkg && !c.ev.pkg) {
+    beep('bad');
+    show('bad', 'ВЫБЕРИТЕ УПАКОВКУ', '', c.book.t, 'У этой книги нет габаритов в таблице', 'Следующий пик не принят');
+    renderPackages();
+    return false;
+  }
+  await enqueue(c.ev);
+  if (c.ev.pkg) S.lastPkg = Object.assign({}, c.ev.pkg);
+  if (S.catalog[c.ev.barcode]) S.catalog[c.ev.barcode].c = c.ev.cell;
+  S.shelf.unshift({ id: c.ev.id, barcode: c.ev.barcode, title: c.book.t, pkg: c.ev.pkg || c.fromTable, prevC: c.prevC });
+  S.current = null;
+  await DB.set('current', null);
+  await DB.set('session', { cell: S.cell, lastPkg: S.lastPkg });
+  renderShelf();
+  return true;
+}
+
+async function choosePkg(p) {
+  if (S.current) {
+    S.current.ev.pkg = Object.assign({}, p);
+    S.current.needsPkg = false;
+    await DB.set('current', S.current);
+    show(stateKind(), $('stLbl').textContent, '', S.current.book.t, $('stMeta').textContent, '');
+  } else if (S.editShelf) {      // исправить упаковку уже поставленной книги
+    const it = S.editShelf; S.editShelf = null;
+    it.pkg = Object.assign({}, p);
+    await enqueue({ id: uid(), ts: new Date().toISOString(), type: 'place', cell: S.cell, barcode: it.barcode, pkg: it.pkg });
+    S.lastPkg = Object.assign({}, p);
+    renderShelf();
+    show('ok', 'УПАКОВКА ИЗМЕНЕНА', '', it.title, pkgLabel(p));
+  } else {
+    S.lastPkg = Object.assign({}, p);
+  }
+  renderPackages();
+}
+
+async function undo() {
+  hideActions();
+  if (S.current) {
+    S.counts[S.current.ev.barcode]--;
+    const t = S.current.book.t;
+    S.current = null; await DB.set('current', null);
+    renderPackages();
+    return show('gray', 'ОТМЕНЕНО', '', t, 'Пик удалён, в таблицу ничего не ушло');
+  }
+  const last = S.shelf.shift();
+  if (!last) return show('gray', 'НЕЧЕГО ОТМЕНЯТЬ', '', '', '');
+  S.counts[last.barcode] = Math.max(0, (S.counts[last.barcode] || 1) - 1);
+  if (S.catalog[last.barcode]) S.catalog[last.barcode].c = last.prevC;
+  const q = await DB.qAll();
+  if (q.find(e => e.id === last.id)) await DB.qDel(last.id);       // ещё не отправлен — просто удалить
+  else await enqueue({ id: uid(), ts: new Date().toISOString(), type: 'undo', undoOf: last.id });
+  S.queued = (await DB.qAll()).length;
+  renderShelf(); renderTop();
+  show('gray', 'ОТМЕНЕНО', '', last.title, 'Таблица вернёт строку как было');
+}
+
+// ------------------------------------------------------------ «Где книга?»
+function showFind(code) {
+  if (code.kind !== 'book') return;
+  const b = S.catalog[code.code];
+  if (!b) { beep('bad'); return show('bad', 'НЕ НАЙДЕНА', '', code.code, 'Нет ни в таблице, ни в архиве, ни в 1С'); }
+  const place = b.c || b.s['1c'] || b.s.arch || '';
+  const srcs = [];
+  if (b.c) srcs.push('таблица: ' + b.c);
+  if (b.s['1c']) srcs.push('1С: ' + b.s['1c']);
+  if (b.s.arch && !b.c) srcs.push('архив: ' + b.s.arch);
+  const differ = new Set([b.c, b.s['1c']].filter(Boolean)).size > 1;
+  beep(differ ? 'warn' : 'ok');
+  show(differ ? 'warn' : 'ok', place ? 'ВЕРНУТЬ НА' : 'МЕСТО НЕ ЗАДАНО', place, b.t,
+       [b.a, b.ar, b.f !== undefined ? `остаток в 1С: ${b.f}` : ''].filter(Boolean).join(' · '),
+       srcs.join(' · ') + (differ ? ' — места расходятся, проверьте' : ''));
+}
+
+function showFindCell(code) {
+  const list = Object.entries(S.catalog).filter(([, b]) => (b.c || b.s['1c']) === code.cell);
+  beep('ok');
+  show('info', 'ЯЧЕЙКА ' + code.cell, `${list.length} книг`, '', list.slice(0, 6).map(([, b]) => b.t).join(' · '));
+}
+
+// ------------------------------------------------------------ интерфейс
+function stateKind() {
+  const c = $('status').className.match(/s-(\w+)/);
+  return c ? c[1] : 'ok';
+}
+
+function show(kind, lbl, big, title, meta, note) {
+  const st = $('status');
+  st.className = 'status s-' + kind;
+  $('stLbl').textContent = lbl;
+  $('stBig').textContent = big || ''; $('stBig').classList.toggle('hidden', !big);
+  $('stTitle').textContent = title || '';
+  $('stMeta').textContent = meta || '';
+  $('stNote').textContent = note || ''; $('stNote').classList.toggle('hidden', !note);
+}
+
+function hideActions() {
+  $('moveActions').classList.add('hidden');
+  $('unknownActions').classList.add('hidden');
+  S.pendingMove = null; S.pendingUnknown = null;
+}
+
+function renderTop() {
+  $('who').textContent = S.user;
+  const s = $('sync');
+  if (!S.online) { s.className = 'sync off'; s.textContent = `Нет сети · ждут отправки: ${S.queued}`; }
+  else { s.className = 'sync'; s.textContent = S.queued ? `Отправляется: ${S.queued}` : 'Онлайн · всё отправлено'; }
+}
+
+function renderPackages() {
+  const show = S.mode === 'place' && !!(S.current || S.editShelf);
+  $('pkgBlock').classList.toggle('hidden', !show);
+  if (!show) return;
+  const cur = S.current, sel = cur ? (cur.ev.pkg || cur.fromTable) : null;
+  const grid = $('pkgGrid'); grid.innerHTML = '';
+  S.packages.filter(p => !p.manual).forEach(p => {
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = Codes.short(p.name);
+    if (sel && sel.name === p.name) b.classList.add('sel');
+    if (cur && !cur.ev.pkg && cur.fromTable && cur.fromTable.name === p.name) b.classList.add('from-table');
+    b.onclick = () => choosePkg({ name: p.name, L: p.L, W: p.W, H: p.H });
+    grid.appendChild(b);
+  });
+  $('pkgManual').classList.toggle('sel', !!(sel && sel.name === 'Ручная'));
+  $('pkgManual').textContent = sel && sel.name === 'Ручная' ? `Ручная ${sel.L}×${sel.W}×${sel.H} — изменить` : 'Ручная — ввести размеры';
+  $('pkgHint').textContent = cur ? (cur.ev.pkg ? (cur.needsPkg ? '' : 'выбрана') : cur.fromTable ? 'из таблицы' : 'не выбрана') : 'исправление';
+  $('pkgInfo').textContent = sel ? `${pkgLabel(sel)} · ${sel.L} × ${sel.W} × ${sel.H} см. Пикните следующую книгу — упаковка подтвердится сама.` : 'У книги нет габаритов в таблице — выберите упаковку.';
+}
+
+function renderShelf() {
+  $('shelfCount').textContent = S.shelf.length;
+  const box = $('shelf'); box.innerHTML = '';
+  S.shelf.slice(0, 8).forEach(it => {
+    const row = document.createElement('div'); row.className = 'row';
+    const d = document.createElement('div');
+    const b = document.createElement('b'); b.textContent = it.title;
+    const s = document.createElement('span'); s.textContent = pkgLabel(it.pkg) || 'габариты из таблицы';
+    d.append(b, s);
+    const btn = document.createElement('button'); btn.type = 'button'; btn.textContent = 'Упаковка';
+    btn.onclick = async () => { if (!await commitCurrent()) return; S.editShelf = it; renderPackages(); show('info', 'ИСПРАВИТЬ УПАКОВКУ', '', it.title, 'Выберите упаковку'); };
+    row.append(d, btn); box.appendChild(row);
+  });
+}
+
+function renderProblems() {
+  const p = $('problems');
+  p.classList.toggle('hidden', !S.problems.length);
+  p.textContent = S.problems.length ? 'Не принято таблицей (см. лист «Ошибки»): ' + S.problems.join(' · ') : '';
+}
+
+function render() {
+  $('cellName').textContent = S.cell || '—';
+  $('cellbar').classList.toggle('hidden', S.mode !== 'place');
+  $('modePlace').classList.toggle('on', S.mode === 'place');
+  $('modeFind').classList.toggle('on', S.mode === 'find');
+  $('shelf').classList.toggle('hidden', S.mode !== 'place');
+  $('undoBtn').classList.toggle('hidden', S.mode !== 'place');
+  renderTop(); renderPackages(); renderShelf(); renderProblems();
+}
+
+async function setMode(m) {
+  if (m === S.mode) return;
+  if (m === 'find' && !await commitCurrent()) return;
+  S.mode = m; hideActions(); render();
+  if (m === 'find') show('info', 'ГДЕ КНИГА?', '', 'Пикните книгу', 'Покажу её место. Ничего не записывается.');
+  else show('info', 'РАЗМЕЩЕНИЕ', '', S.cell ? 'Ячейка ' + S.cell : 'Пикните этикетку ячейки', '');
+}
+
+// ручная упаковка
+function openManual() {
+  const sel = S.current ? (S.current.ev.pkg || S.current.fromTable) : (S.lastPkg && S.lastPkg.name === 'Ручная' ? S.lastPkg : null);
+  const base = sel && sel.name === 'Ручная' ? sel : (S.lastManual || { L: 30, W: 22, H: 5 });
+  $('mL').value = base.L; $('mW').value = base.W; $('mH').value = base.H;
+  $('manualSheet').classList.remove('hidden');
+}
+function closeManual() { $('manualSheet').classList.add('hidden'); focusScan(); }
+
+// удержание для перемещения
+let holdTimer = null, holdStart = 0, holdRaf = 0;
+function holdDown() {
+  holdStart = Date.now();
+  const tick = () => {
+    const k = Math.min(1, (Date.now() - holdStart) / HOLD_MS);
+    $('holdFill').style.width = (k * 100) + '%';
+    if (k < 1) holdRaf = requestAnimationFrame(tick);
+  };
+  tick();
+  holdTimer = setTimeout(async () => {
+    const pm = S.pendingMove; hideActions(); $('holdFill').style.width = '0';
+    if (pm) await startCurrent(pm.code, pm.book, 'move', '');
+  }, HOLD_MS);
+}
+function holdUp() { clearTimeout(holdTimer); cancelAnimationFrame(holdRaf); $('holdFill').style.width = '0'; }
+
+// поле сканера всегда в фокусе
+function focusScan() {
+  if (!$('manualSheet').classList.contains('hidden') || !$('menuSheet').classList.contains('hidden')) return;
+  if (!$('mainView').classList.contains('hidden')) $('scan').focus({ preventScroll: true });
+}
+
+// ------------------------------------------------------------ запуск
+async function start() {
+  await DB.open();
+  try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch (e) {}
+  S.device = (await DB.get('device')) || uid(); await DB.set('device', S.device);
+  const auth = await DB.get('auth');
+  if (auth) { S.key = auth.key; S.user = auth.user; }
+  const cat = await DB.get('catalog');
+  if (cat) { S.catalog = cat.books || {}; S.packages = cat.packages || []; S.catalogAt = cat.at || ''; await overlayQueue(); }
+  const sess = await DB.get('session');
+  if (sess) { S.cell = sess.cell || ''; S.lastPkg = sess.lastPkg || null; }
+  S.current = await DB.get('current') || null;
+  S.queued = (await DB.qAll()).length;
+
+  bind();
+  if (!S.key) { $('setupView').classList.remove('hidden'); return; }
+  enterMain();
+}
+
+function enterMain() {
+  $('setupView').classList.add('hidden');
+  $('mainView').classList.remove('hidden');
+  render();
+  if (S.current) show('ok', 'ВОССТАНОВЛЕН ПОСЛЕДНИЙ ПИК', '', S.current.book.t, 'Пикните следующую книгу или отмените');
+  else show('info', 'ГОТОВО', '', S.cell ? 'Ячейка ' + S.cell + ' — пикайте книги' : 'Пикните этикетку ячейки', '');
+  focusScan();
+  loadCatalog(!S.catalogAt);
+  sync();
+  setInterval(sync, SYNC_EVERY_MS);
+  setInterval(() => loadCatalog(false), 60 * 1000);
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
+}
+
+function bind() {
+  $('keySave').onclick = async () => {
+    const key = $('keyInput').value.trim();
+    if (!key) return;
+    $('keyMsg').textContent = 'Проверяю…';
+    S.key = key;
+    try {
+      const j = await api('GET', { action: 'ping' });
+      S.user = j.user;
+      await DB.set('auth', { key, user: j.user });
+      enterMain();
+    } catch (e) {
+      S.key = '';
+      $('keyMsg').textContent = 'Не получилось: ' + e.message + '. Нужен интернет и правильный ключ.';
+    }
+  };
+  const scan = $('scan');
+  scan.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); const v = scan.value; scan.value = ''; if (v.trim()) onScan(v); }
+  });
+  scan.addEventListener('blur', () => setTimeout(focusScan, 150));
+  document.addEventListener('click', () => setTimeout(focusScan, 50));
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { focusScan(); sync(); } });
+  window.addEventListener('online', () => { S.online = true; sync(); loadCatalog(false); });
+  window.addEventListener('offline', () => { S.online = false; renderTop(); });
+
+  $('modePlace').onclick = () => setMode('place');
+  $('modeFind').onclick = () => setMode('find');
+  $('undoBtn').onclick = undo;
+  $('pkgManual').onclick = openManual;
+  $('moveNo').onclick = () => { hideActions(); show('gray', 'НЕ РАЗМЕЩЕНА', '', 'Отнесите книгу на её полку', ''); };
+  const mh = $('moveHold');
+  mh.addEventListener('pointerdown', holdDown);
+  ['pointerup', 'pointerleave', 'pointercancel'].forEach(ev => mh.addEventListener(ev, holdUp));
+  $('unkSave').onclick = async () => {
+    const code = S.pendingUnknown; hideActions();
+    if (!code) return;
+    await enqueue({ id: uid(), ts: new Date().toISOString(), type: 'place', cell: S.cell, barcode: code, pkg: S.lastPkg });
+    show('warn', 'СОХРАНЕНО', '', code, 'Таблица проверит при отправке. Если книги нет — она попадёт в «Ошибки».');
+  };
+  document.querySelectorAll('#manualSheet .step button').forEach(b => {
+    b.onclick = () => { const i = $('m' + b.dataset.d); i.value = Math.max(1, (Number(i.value) || 0) + Number(b.dataset.s)); };
+  });
+  $('mBack').onclick = closeManual;
+  $('mOk').onclick = () => {
+    const L = Number($('mL').value), W = Number($('mW').value), H = Number($('mH').value);
+    if (!(L > 0 && W > 0 && H > 0)) return;
+    S.lastManual = { L, W, H };
+    closeManual();
+    choosePkg({ name: 'Ручная', L, W, H });
+  };
+  $('menuBtn').onclick = () => {
+    $('mInfo').textContent = `Версия ${APP_VERSION} · справочник: ${S.catalogAt ? new Date(S.catalogAt).toLocaleString('ru-RU') : 'не загружен'} · книг в справочнике: ${Object.keys(S.catalog).length}`;
+    $('menuSheet').classList.remove('hidden');
+  };
+  $('mClose').onclick = () => { $('menuSheet').classList.add('hidden'); focusScan(); };
+  $('mSync').onclick = () => { $('menuSheet').classList.add('hidden'); sync(); focusScan(); };
+  $('mCatalog').onclick = () => { $('menuSheet').classList.add('hidden'); loadCatalog(true); focusScan(); };
+  $('mExport').onclick = async () => {
+    const q = await DB.qAll();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([JSON.stringify({ user: S.user, device: S.device, events: q }, null, 1)], { type: 'application/json' }));
+    a.download = `неотправленное_${S.user}_${new Date().toISOString().slice(0, 16).replace(':', '-')}.json`;
+    a.click();
+  };
+  $('mKey').onclick = async () => {
+    if ((await DB.qAll()).length) { $('mInfo').textContent = 'Сначала дождитесь отправки всех пиков.'; return; }
+    await DB.set('auth', null); location.reload();
+  };
+}
+
+if (typeof window !== 'undefined' && !window.RAZM_NO_START) start();
+if (typeof module !== 'undefined') module.exports = { Codes };
