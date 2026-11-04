@@ -87,11 +87,27 @@ Core.cellCode = function (cell) {
   return '991' + ('00' + m[1]).slice(-3) + ('00' + m[2]).slice(-3);
 };
 
-/** Время размещения из ячейки таблицы -> ISO-строка (Sheets может вернуть Date). */
-Core.isoTs = function (v) {
-  if (v === null || v === undefined || v === '') return '';
-  if (Object.prototype.toString.call(v) === '[object Date]') return isNaN(v) ? '' : v.toISOString();
-  return String(v);
+// Время в таблице пишется по Москве: "04.11.2026 12:24:05" (UTC+3, без перехода на летнее время).
+var MSK_OFFSET_MS = 3 * 3600 * 1000;
+
+/** Любое время (Date, ISO "2026-11-04T09:24:05Z", московское "04.11.2026 12:24:05") -> миллисекунды. */
+Core.toMs = function (v) {
+  if (v === null || v === undefined || v === '') return 0;
+  if (Object.prototype.toString.call(v) === '[object Date]') return isNaN(v) ? 0 : v.getTime();
+  var m = /^(\d{2})\.(\d{2})\.(\d{4})\s+(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(String(v).trim());
+  if (m) return Date.UTC(+m[3], +m[2] - 1, +m[1], +m[4], +m[5], +(m[6] || 0)) - MSK_OFFSET_MS;
+  var t = Date.parse(String(v));
+  return isNaN(t) ? 0 : t;
+};
+
+/** -> "04.11.2026 12:24:05" по Москве */
+Core.msk = function (v) {
+  var ms = Core.toMs(v);
+  if (!ms) return '';
+  var d = new Date(ms + MSK_OFFSET_MS);
+  function p(n) { return (n < 10 ? '0' : '') + n; }
+  return p(d.getUTCDate()) + '.' + p(d.getUTCMonth() + 1) + '.' + d.getUTCFullYear() + ' ' +
+         p(d.getUTCHours()) + ':' + p(d.getUTCMinutes()) + ':' + p(d.getUTCSeconds());
 };
 
 Core.isCell = function (cell) { return /^С\d+-П\d+$/.test(String(cell || '').trim()); };
@@ -117,8 +133,8 @@ Core.applyPlace = function (row, ev) {
   if (!Core.isCell(ev.cell)) return { result: 'нет ячейки' };
   var changes = {};
   var cur = String(row.cell || '').trim();
-  if (row.placedAt && ev.ts && String(ev.ts) < String(row.placedAt)) {
-    return { result: 'устарело: есть более позднее размещение ' + row.placedAt };
+  if (row.placedAt && ev.ts && Core.toMs(ev.ts) < Core.toMs(row.placedAt)) {
+    return { result: 'устарело: есть более позднее размещение ' + Core.msk(row.placedAt) };
   }
   if (cur && cur !== ev.cell && ev.type !== 'move') {
     return { result: 'уже размещена в ' + cur };
@@ -132,7 +148,7 @@ Core.applyPlace = function (row, ev) {
     if (Number(row.H) !== Number(ev.pkg.H)) changes.H = Number(ev.pkg.H);
     if (String(row.pkg || '') !== String(ev.pkg.name || '')) changes.pkg = String(ev.pkg.name || '');
   }
-  changes.placedAt = ev.ts;
+  changes.placedAt = Core.msk(ev.ts);
   changes.placedBy = ev.user;
   return { result: 'ok', changes: changes };
 };
@@ -354,7 +370,7 @@ function processEvents_(user, device, events) {
         if (rowNum === -1) throw new Error('штрихкод встречается в таблице дважды — разберите вручную');
         var rv = books.getRange(rowNum, 1, 1, books.getLastColumn()).getValues()[0];
         var row = { cell: rv[C.cell - 1], article: rv[C.article - 1], pkg: rv[C.pkg - 1], L: rv[C.L - 1],
-                    W: rv[C.W - 1], H: rv[C.H - 1], placedAt: Core.isoTs(rv[C.placedAt - 1]), placedBy: rv[C.placedBy - 1] };
+                    W: rv[C.W - 1], H: rv[C.H - 1], placedAt: rv[C.placedAt - 1], placedBy: rv[C.placedBy - 1] };
         prev = row;
         if (pkg && pkg.name && !pkg.L) {  // стандартная упаковка по имени
           for (var q = 0; q < packages.length; q++) if (packages[q].name === pkg.name) pkg = packages[q];
@@ -367,21 +383,23 @@ function processEvents_(user, device, events) {
     } catch (err) {
       res = 'ошибка: ' + (err.message || err);
     }
-    var jrow = [id, now, String(ev.ts || ''), user, device, String(ev.type || ''), String(ev.barcode || ''),
+    var jrow = [id, Core.msk(now), Core.msk(ev.ts), user, device, String(ev.type || ''), String(ev.barcode || ''),
       String(ev.cell || ''), pkg ? (pkg.name || '') : '', pkg ? (pkg.L || '') : '', pkg ? (pkg.W || '') : '',
       pkg ? (pkg.H || '') : '', res, rowNum, prev.cell || '', prev.article || '', prev.pkg || '',
-      prev.L || '', prev.W || '', prev.H || '', prev.placedAt || ''];
+      prev.L || '', prev.W || '', prev.H || '', prev.placedAt ? Core.msk(prev.placedAt) : ''];
     journal.appendRow(jrow);
+    journal.getRange(journal.getLastRow(), 2, 1, 2).setNumberFormat('@');   // время — текстом, как написано
     journal.getRange(journal.getLastRow(), 7).setNumberFormat('@');
+    journal.getRange(journal.getLastRow(), 21).setNumberFormat('@');
     done[id] = { row: journal.getLastRow(), vals: jrow };
-    if (res !== 'ok' && res !== 'отменено') errors.appendRow([now, user, id, String(ev.barcode || ''), String(ev.cell || ''), res]);
+    if (res !== 'ok' && res !== 'отменено') errors.appendRow([Core.msk(now), user, id, String(ev.barcode || ''), String(ev.cell || ''), res]);
     out.push({ id: id, result: res });
   });
   return out;
 }
 
 function writeRow_(sheet, rowNum, C, ch) {
-  if (ch.placedAt !== undefined) sheet.getRange(rowNum, C.placedAt).setNumberFormat('@');  // ISO-строкой, не датой
+  if (ch.placedAt !== undefined) sheet.getRange(rowNum, C.placedAt).setNumberFormat('@');  // текстом, не датой
   var map = { cell: C.cell, article: C.article, pkg: C.pkg, L: C.L, W: C.W, H: C.H, placedAt: C.placedAt, placedBy: C.placedBy };
   for (var k in ch) {
     if (!map[k]) continue;

@@ -81,6 +81,13 @@ assert.strictEqual(a.result, 'ok'); assert.strictEqual(a.changes.cell, 'С19-П2
 a = Core.applyPlace({ cell: 'С5-П1', placedAt: '2026-11-04T12:00:00Z' }, { ts: '2026-11-04T10:00:00Z', type: 'move', cell: 'С19-П2', barcode: 'x' });
 assert.ok(a.result.startsWith('устарело'));
 
+assert.strictEqual(Core.msk('2026-11-04T09:24:05Z'), '04.11.2026 12:24:05');
+assert.strictEqual(Core.toMs('04.11.2026 12:24:05'), Date.parse('2026-11-04T09:24:05Z'));
+a = Core.applyPlace({ cell: 'С5-П1', placedAt: '04.11.2026 15:00:00' }, { ts: '2026-11-04T11:00:00Z', type: 'move', cell: 'С19-П2', barcode: 'x' });
+assert.ok(a.result.startsWith('устарело') && a.result.includes('04.11.2026 15:00:00'), a.result);   // 11:00Z = 14:00 МСК < 15:00
+a = Core.applyPlace({ cell: 'С5-П1', placedAt: '04.11.2026 13:00:00' }, { ts: '2026-11-04T11:00:00Z', type: 'move', cell: 'С19-П2', barcode: 'x' });
+assert.strictEqual(a.result, 'ok'); assert.strictEqual(a.changes.placedAt, '04.11.2026 14:00:00');
+
 // ---------- обработка событий на поддельной таблице ----------
 const H = ['', 'Название книги', 'Авторы', 'Место хранения', 'НАШ ШТРИХКОД', 'Количество', 'Длина', 'Ширина', 'Высота', 'Статистика-формула'];
 const books = new Sheet('Лист1', [H,
@@ -128,6 +135,7 @@ assert.strictEqual(row(2)[hm['Упаковка']], 'Развертка - 5 см.
 assert.strictEqual(row(3)[hm['Место хранения']], 'С5-П1', 'чужая ячейка не перезаписана');
 assert.strictEqual(row(1)[hm['Статистика-формула']], '=X', 'чужие столбцы не тронуты');
 assert.strictEqual(row(1)[hm['Размещено кем']], 'Ольга');
+assert.strictEqual(row(1)[hm['Размещено']], '04.11.2026 13:00:00', 'время размещения по Москве');
 
 // повторная отправка тех же событий — ничего не меняется
 r = post([{ id: 'e1', ts: '2026-11-04T10:00:00Z', type: 'place', cell: 'С21-П4', barcode: '2000000311869' }]);
