@@ -20,6 +20,12 @@ button{font-family:inherit;color:inherit}
 .who{font-weight:700;font-size:16px}
 .sync{font-size:14px;color:var(--quiet);text-align:right}
 .sync.off{color:var(--warn-ink);font-weight:700}
+.sync.bad{color:var(--bad);font-weight:700}
+.infobar{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:4px 12px;background:#fff;border-bottom:1px solid var(--line);min-height:44px}
+.infobar.test{background:var(--warn-bg);border-bottom-color:var(--warn)}
+.infobar .tbl{font-size:13px;color:var(--quiet);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.infobar.test .tbl{color:var(--warn-ink);font-weight:800;font-size:15px;letter-spacing:.03em}
+.cat{flex:none;height:36px;padding:0 12px;border:1px solid #d4d4cf;border-radius:10px;background:#fff;font-size:14px;font-weight:600}
 .modes{display:flex;gap:8px;padding:8px 12px 0}
 .modes button{flex:1;height:48px;border:1px solid #d4d4cf;border-radius:12px;background:#fff;font-size:16px;font-weight:600}
 .modes button.on{background:var(--dark);border-color:var(--dark);color:#fff}
@@ -76,6 +82,7 @@ button{font-family:inherit;color:inherit}
 .step label{width:82px;font-size:18px;font-weight:600}
 .step button{width:64px;height:64px;border:1px solid #d4d4cf;border-radius:14px;background:var(--bg);font-size:30px;font-weight:700}
 .step input{flex:1;min-width:0;height:64px;border:2px solid #d4d4cf;border-radius:14px;text-align:center;font-size:30px;font-weight:800;background:#fff}
+.mmsg{margin:0;min-height:0;color:var(--bad-ink);font-weight:700;font-size:15px}.mmsg:empty{display:none}
 .row2{display:flex;gap:10px}.row2 button{height:60px;border-radius:14px;font-size:17px;font-weight:700}
 .row2 .ok{flex:1;border:0;background:var(--ok);color:#fff}.row2 .back{width:130px;border:1px solid #d4d4cf;background:#fff}
 .menu button{height:56px;border:1px solid #d4d4cf;border-radius:12px;background:#fff;font-size:16px;font-weight:600;text-align:left;padding:0 16px}
@@ -101,6 +108,10 @@ button{font-family:inherit;color:inherit}
       <span class="who" id="who"></span>
       <span class="sync" id="sync"></span>
     </div>
+    <div class="infobar" id="infobar">
+      <span class="tbl" id="tblName"></span>
+      <button id="catBtn" class="cat" type="button">Справочник ↻</button>
+    </div>
     <div class="modes">
       <button id="modePlace" type="button" class="on">Размещение</button>
       <button id="modeFind" type="button">Где книга?</button>
@@ -122,6 +133,7 @@ button{font-family:inherit;color:inherit}
       <button id="moveHold" class="secondary" type="button"><span class="fill" id="holdFill"></span><span style="position:relative">Переместить сюда · удерживайте 2 секунды</span></button>
     </div>
     <div id="unknownActions" class="actions hidden">
+      <button id="unkRefresh" class="primary" type="button">Обновить справочник и проверить ещё раз</button>
       <button id="unkSave" class="secondary" type="button">Всё равно сохранить (таблица проверит)</button>
     </div>
     <div id="pkgBlock" class="hidden">
@@ -147,6 +159,7 @@ button{font-family:inherit;color:inherit}
     <div class="step"><label for="mL">Длина</label><button type="button" data-d="L" data-s="-1" aria-label="Уменьшить длину">−</button><input id="mL" inputmode="numeric"><button type="button" data-d="L" data-s="1" aria-label="Увеличить длину">+</button></div>
     <div class="step"><label for="mW">Ширина</label><button type="button" data-d="W" data-s="-1" aria-label="Уменьшить ширину">−</button><input id="mW" inputmode="numeric"><button type="button" data-d="W" data-s="1" aria-label="Увеличить ширину">+</button></div>
     <div class="step"><label for="mH">Высота</label><button type="button" data-d="H" data-s="-1" aria-label="Уменьшить высоту">−</button><input id="mH" inputmode="numeric"><button type="button" data-d="H" data-s="1" aria-label="Увеличить высоту">+</button></div>
+    <p id="mMsg" class="mmsg" role="alert"></p>
     <div class="row2"><button class="back" id="mBack" type="button">Назад</button><button class="ok" id="mOk" type="button">Готово</button></div>
   </div>
 </div>

@@ -4,12 +4,13 @@
 
 const API = window.RAZM_API ||
   'https://script.google.com/macros/s/AKfycbzsrMDosDNc4HsdZyGS-WUeu7bUxzGh0HCho9dZJAC8_p163mjrFFPM3WCPH35hqQ_b/exec';
-const APP_VERSION = '1.2';
+const APP_VERSION = '1.3';
 const CATALOG_EVERY_MS = 10 * 60 * 1000;
 const SYNC_EVERY_MS = 5000;
 const DOUBLE_SCAN_MS = 1500;
 const HOLD_MS = 2000;
-const autoCloseMs = () => window.RAZM_AUTO_CLOSE_MS || 5 * 60 * 1000;   // последняя книга закрывается сама через 5 минут
+const autoCloseMs = () => window.RAZM_AUTO_CLOSE_MS || 5 * 60 * 1000;   // 5 минут без пиков: последняя книга записывается, ячейка отпускается
+const MANUAL_MAX = { L: 45, W: 45, H: 15 };                               // больше — переспросить (опечатка?)
 
 // ------------------------------------------------------------ коды
 const Codes = {
@@ -87,6 +88,9 @@ const S = {
   shelf: [],                   // пики на текущей полке: {id, barcode, title, pkg, prevC, queued}
   counts: {},                  // штрихкод -> сколько экземпляров пикнуто на этой полке
   queued: 0, online: navigator.onLine, syncing: false, problems: [],
+  tableErr: '', table: '', busy: false,
+  lastActivity: 0,             // время последнего действия — для сброса ячейки после перерыва
+  pkgByCode: {},               // упаковка, выбранная на этой полке для штрихкода (для 2-го, 3-го экземпляра)
   lastScan: { code: '', at: 0 },
   pendingMove: null, pendingUnknown: null,
 };
@@ -113,12 +117,17 @@ function beep(kind) {
 // ------------------------------------------------------------ сеть
 async function api(method, params, body) {
   const url = API + '?' + new URLSearchParams(Object.assign({ key: S.key }, params || {}));
-  const r = await fetch(url, method === 'GET' ? {} : {
-    method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-    body: JSON.stringify(Object.assign({ key: S.key, device: S.device }, body))
-  });
-  const j = await r.json();
+  let r, j;
+  try {
+    r = await fetch(url, method === 'GET' ? {} : {
+      method: 'POST', headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      body: JSON.stringify(Object.assign({ key: S.key, device: S.device }, body))
+    });
+  } catch (e) { throw Object.assign(new Error('нет сети'), { net: true }); }
+  try { j = await r.json(); }
+  catch (e) { throw new Error('таблица ответила не так — скрипт не опубликован или нужно разрешение'); }
   if (!j.ok) throw new Error(j.error || 'ошибка таблицы');
+  if (j.table) S.table = j.table;
   return j;
 }
 
@@ -128,10 +137,12 @@ async function loadCatalog(force) {
     const j = await api('GET', { action: 'catalog' });
     S.catalog = j.books || {}; S.packages = j.packages || []; S.catalogAt = j.version || new Date().toISOString();
     await overlayQueue();
-    await DB.set('catalog', { books: S.catalog, packages: S.packages, at: S.catalogAt });
-    renderPackages(); renderTop();
+    await DB.set('catalog', { books: S.catalog, packages: S.packages, at: S.catalogAt, table: S.table });
+    netOk(); renderPackages(); renderTop();
+    return true;
   } catch (e) {
-    S.online = false; renderTop();
+    netFail(e); renderTop();
+    return false;
   }
 }
 
@@ -153,14 +164,20 @@ async function sync() {
       }
       await DB.qDel(r.id);
     }
-    S.online = true;
+    netOk();
   } catch (e) {
-    S.online = false;
+    netFail(e);
   } finally {
     S.syncing = false;
     S.queued = (await DB.qAll()).length;
     renderTop(); renderProblems();
   }
+}
+
+function netOk() { S.online = true; S.tableErr = ''; }
+function netFail(e) {
+  if (e && e.net) { S.online = false; S.tableErr = ''; }
+  else { S.online = true; S.tableErr = String((e && e.message) || e); }
 }
 
 /** Пики, ещё не дошедшие до таблицы, должны оставаться видны в справочнике. */
@@ -195,6 +212,8 @@ async function onScan(raw) {
   const now = Date.now();
   if (code.code === S.lastScan.code && now - S.lastScan.at < DOUBLE_SCAN_MS) return;  // двойной пик
   S.lastScan = { code: code.code, at: now };
+  S.lastActivity = now;
+  if (S.busy) { beep('bad'); show('warn', 'ПОДОЖДИТЕ', '', 'Обновляю справочник', 'Пикните ещё раз через пару секунд'); S.lastScan = { code: '', at: 0 }; return; }
   hideActions();
   const accepted = await handleScan(code);
   if (!accepted) S.lastScan = { code: '', at: 0 };   // отклонённый пик можно сразу повторить
@@ -212,8 +231,8 @@ async function handleScan(code) {
 
   if (code.kind === 'cell') {
     if (!await commitCurrent()) return false;
-    if (S.cell !== code.cell) { S.cell = code.cell; S.shelf = []; S.counts = {}; }
-    await DB.set('session', { cell: S.cell, lastPkg: S.lastPkg });
+    if (S.cell !== code.cell) { S.cell = code.cell; S.shelf = []; S.counts = {}; S.pkgByCode = {}; }
+    await saveSession();
     beep('ok');
     render();
     show('info', 'ЯЧЕЙКА', '', code.cell, 'Пикайте книги, которые ставите на эту полку');
@@ -226,23 +245,30 @@ async function handleScan(code) {
   const book = S.catalog[code.code];
   const warn = code.checksumOk || code.code.length !== 13 ? '' : 'Проверьте штрихкод: контрольная цифра не сходится';
 
+  if (!book && !code.recheck && navigator.onLine && (!S.catalogAt || Date.now() - Date.parse(S.catalogAt) > 30 * 1000)) {
+    S.busy = true; renderTop();
+    show('info', 'ИЩУ В ТАБЛИЦЕ', '', code.code, 'Книги нет в справочнике телефона — обновляю его');
+    await loadCatalog(true);
+    S.busy = false; renderTop();
+    return handleScan(Object.assign({}, code, { recheck: true }));
+  }
   if (!book) {
     S.pendingUnknown = code.code;
     beep('bad');
-    show('bad', 'НЕИЗВЕСТНЫЙ ШТРИХКОД', '', code.code, 'Нет в справочнике. Отложите книгу или сохраните — таблица проверит при отправке.');
+    show('bad', 'НЕИЗВЕСТНЫЙ ШТРИХКОД', '', code.code, `Нет в справочнике (обновлён в ${hhmm(S.catalogAt)}). Отложите книгу или сохраните — таблица проверит при отправке.`, isbnHint(code.code));
     $('unknownActions').classList.remove('hidden');
     return false;
   }
   if (!book.n) {   // не новая книга: есть только в архиве или 1С
     const where = book.s['1c'] || book.s.arch || '—';
     beep('warn');
-    show('gray', 'НЕ НОВАЯ КНИГА', 'Место: ' + where, book.t, [book.a, 'новые книги ставятся из «Лист1»'].filter(Boolean).join(' · '));
+    show('gray', 'НЕ НОВАЯ КНИГА', 'Место: ' + where, book.t, [book.a, 'новые книги ставятся из «Лист1»'].filter(Boolean).join(' · '), isbnHint(code.code));
     return false;
   }
   if (book.c && book.c !== S.cell) {
     S.pendingMove = { code, book };
     beep('bad');
-    show('bad', 'УЖЕ РАЗМЕЩЕНА', 'на ' + book.c, book.t, 'Эту книгу на эту полку не ставим. Артикул остаётся прежним.');
+    show('bad', 'УЖЕ РАЗМЕЩЕНА', 'на ' + book.c, book.t, 'Эту книгу на эту полку не ставим. Артикул остаётся прежним.', isbnHint(code.code));
     $('moveActions').classList.remove('hidden');
     $('moveNo').textContent = `Понятно, отнесу на ${book.c}`;
     return false;
@@ -256,7 +282,8 @@ async function startCurrent(code, book, type, warn) {
   const ev = { id: uid(), ts: new Date().toISOString(), type, cell: S.cell, barcode: code.code, pkg: null };
   let needsPkg = false;
   if (!fromTable) {
-    if (S.lastPkg) ev.pkg = Object.assign({}, S.lastPkg); else needsPkg = true;
+    const same = S.pkgByCode[code.code];          // тот же штрихкод уже был на этой полке — та же книга, та же упаковка
+    if (same) ev.pkg = Object.assign({}, same); else needsPkg = true;
   }
   S.counts[code.code] = (S.counts[code.code] || 0) + 1;
   S.current = { ev, book, needsPkg, fromTable, prevC: book.c || '', touchedAt: Date.now() };
@@ -283,12 +310,12 @@ async function commitCurrent() {
     return false;
   }
   await enqueue(c.ev);
-  if (c.ev.pkg) S.lastPkg = Object.assign({}, c.ev.pkg);
+  if (c.ev.pkg) { S.lastPkg = Object.assign({}, c.ev.pkg); S.pkgByCode[c.ev.barcode] = Object.assign({}, c.ev.pkg); }
   if (S.catalog[c.ev.barcode]) S.catalog[c.ev.barcode].c = c.ev.cell;
   S.shelf.unshift({ id: c.ev.id, barcode: c.ev.barcode, title: c.book.t, pkg: c.ev.pkg || c.fromTable, prevC: c.prevC });
   S.current = null;
   await DB.set('current', null);
-  await DB.set('session', { cell: S.cell, lastPkg: S.lastPkg });
+  await saveSession();
   renderShelf();
   return true;
 }
@@ -297,12 +324,13 @@ async function choosePkg(p) {
   if (S.current) {
     S.current.ev.pkg = Object.assign({}, p);
     S.current.needsPkg = false;
-    S.current.touchedAt = Date.now();
+    S.current.touchedAt = S.lastActivity = Date.now();
     await DB.set('current', S.current);
     show(stateKind(), $('stLbl').textContent, '', S.current.book.t, $('stMeta').textContent, '');
   } else if (S.editShelf) {      // исправить упаковку уже поставленной книги
     const it = S.editShelf; S.editShelf = null;
     it.pkg = Object.assign({}, p);
+    S.pkgByCode[it.barcode] = Object.assign({}, p);
     await enqueue({ id: uid(), ts: new Date().toISOString(), type: 'place', cell: S.cell, barcode: it.barcode, pkg: it.pkg });
     S.lastPkg = Object.assign({}, p);
     renderShelf();
@@ -315,6 +343,7 @@ async function choosePkg(p) {
 
 async function undo() {
   hideActions();
+  S.lastActivity = Date.now();
   if (S.current) {
     S.counts[S.current.ev.barcode]--;
     const t = S.current.book.t;
@@ -341,8 +370,8 @@ async function shelfDone() {
   if (!S.cell) return show('gray', 'ЯЧЕЙКА НЕ ВЫБРАНА', '', 'Пикните этикетку ячейки', '');
   if (!await commitCurrent()) return;
   const cell = S.cell, n = S.shelf.length;
-  S.cell = ''; S.shelf = []; S.counts = {}; S.editShelf = null;
-  await DB.set('session', { cell: '', lastPkg: S.lastPkg });
+  releaseCell();
+  await saveSession();
   render();
   beep('ok');
   show('ok', 'ПОЛКА ГОТОВА', cell, `${n} ${plural(n, 'книга', 'книги', 'книг')}`, 'Отправляю в таблицу…');
@@ -358,14 +387,21 @@ function plural(n, one, few, many) {
   return a === 1 && b !== 11 ? one : a >= 2 && a <= 4 && (b < 12 || b > 14) ? few : many;
 }
 
-/** Последняя книга, после которой 5 минут ничего не пикали, записывается сама. */
+function releaseCell() { S.cell = ''; S.shelf = []; S.counts = {}; S.pkgByCode = {}; S.editShelf = null; }
+
+/** 5 минут без пиков: последняя книга записывается, ячейка отпускается — после перерыва полку пикают заново. */
 async function autoClose() {
+  if (S.mode !== 'place' || (!S.cell && !S.current)) return;
+  if (Date.now() - (S.lastActivity || 0) < autoCloseMs()) return;
   const c = S.current;
-  if (!c || (c.needsPkg && !c.ev.pkg)) return;           // без упаковки не закрываем — ждём выбора
-  if (Date.now() - (c.touchedAt || Date.parse(c.ev.ts)) < autoCloseMs()) return;
-  if (!await commitCurrent()) return;
-  show('ok', 'ПОСЛЕДНЯЯ КНИГА ЗАПИСАНА', '', c.book.t, '5 минут не было пиков — книга закрыта автоматически. Ячейка ' + S.cell + ' по-прежнему активна.');
-  renderPackages();
+  if (c && c.needsPkg && !c.ev.pkg) return;             // без упаковки не закрываем — ждём выбора
+  if (c && !await commitCurrent()) return;
+  const cell = S.cell;
+  releaseCell();
+  await saveSession();
+  render();
+  show('warn', 'ПЕРЕРЫВ — ПИКНИТЕ ПОЛКУ', cell || '', c ? 'Последняя книга записана: ' + c.book.t : 'Ячейка отпущена',
+       `5 минут не было пиков, поэтому ячейка ${cell || ''} отпущена — чтобы следующие книги не ушли на старую полку.`);
   sync();
 }
 
@@ -417,8 +453,35 @@ function hideActions() {
 function renderTop() {
   $('who').textContent = S.user;
   const s = $('sync');
-  if (!S.online) { s.className = 'sync off'; s.textContent = `Нет сети · ждут отправки: ${S.queued}`; }
+  if (S.tableErr) { s.className = 'sync bad'; s.textContent = `Таблица не принимает: ${S.tableErr} · ждут отправки: ${S.queued}`; }
+  else if (!S.online) { s.className = 'sync off'; s.textContent = `Нет сети · ждут отправки: ${S.queued}`; }
   else { s.className = 'sync'; s.textContent = S.queued ? `Отправляется: ${S.queued}` : 'Онлайн · всё отправлено'; }
+  const test = /тест/i.test(S.table || '');
+  $('infobar').classList.toggle('test', test);
+  $('tblName').textContent = test ? 'ТЕСТОВАЯ ТАБЛИЦА' : (S.table || '');
+  $('catBtn').textContent = S.busy ? 'Обновляю…' : `Справочник ${S.catalogAt ? hhmm(S.catalogAt) : '—'} ↻`;
+}
+
+function hhmm(iso) { const d = new Date(iso); return isNaN(d) ? '—' : d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }); }
+
+async function saveSession() {
+  await DB.set('session', { cell: S.cell, lastPkg: S.lastPkg, lastActivity: S.lastActivity });
+}
+
+/** Обновить справочник по кнопке; если на экране неизвестный штрихкод — сразу проверить его снова. */
+async function refreshCatalog() {
+  if (S.busy) return;
+  const again = S.pendingUnknown;
+  S.busy = true; renderTop();
+  const ok = await loadCatalog(true);
+  S.busy = false; renderTop();
+  if (again) { hideActions(); return onScan(again); }
+  if (ok) show('info', 'СПРАВОЧНИК ОБНОВЛЁН', '', `${Object.keys(S.catalog).length} книг`, S.cell ? 'Ячейка ' + S.cell + ' — пикайте книги' : 'Пикните этикетку ячейки');
+  else show('warn', 'НЕ УДАЛОСЬ ОБНОВИТЬ', '', S.tableErr || 'нет сети', 'Работаю со справочником от ' + hhmm(S.catalogAt));
+}
+
+function isbnHint(code) {
+  return /^97[89]/.test(code) ? 'Это заводской штрихкод. Если на книге есть наша наклейка 200… — пикните её.' : '';
 }
 
 function renderPackages() {
@@ -486,8 +549,10 @@ function openManual() {
   const sel = S.current ? (S.current.ev.pkg || S.current.fromTable) : (S.lastPkg && S.lastPkg.name === 'Ручная' ? S.lastPkg : null);
   const base = sel && sel.name === 'Ручная' ? sel : (S.lastManual || { L: 30, W: 22, H: 5 });
   $('mL').value = base.L; $('mW').value = base.W; $('mH').value = base.H;
+  resetManualCheck();
   $('manualSheet').classList.remove('hidden');
 }
+function resetManualCheck() { S.manualOk = ''; $('mMsg').textContent = ''; $('mOk').textContent = 'Готово'; }
 function closeManual() { $('manualSheet').classList.add('hidden'); focusScan(); }
 
 // удержание для перемещения
@@ -596,9 +661,9 @@ async function start() {
   const auth = await DB.get('auth');
   if (auth) { S.key = auth.key; S.user = auth.user; }
   const cat = await DB.get('catalog');
-  if (cat) { S.catalog = cat.books || {}; S.packages = cat.packages || []; S.catalogAt = cat.at || ''; await overlayQueue(); }
+  if (cat) { S.catalog = cat.books || {}; S.packages = cat.packages || []; S.catalogAt = cat.at || ''; S.table = cat.table || ''; await overlayQueue(); }
   const sess = await DB.get('session');
-  if (sess) { S.cell = sess.cell || ''; S.lastPkg = sess.lastPkg || null; }
+  if (sess) { S.cell = sess.cell || ''; S.lastPkg = sess.lastPkg || null; S.lastActivity = sess.lastActivity || 0; }
   S.current = await DB.get('current') || null;
   S.queued = (await DB.qAll()).length;
 
@@ -652,7 +717,10 @@ function bind() {
   $('modePlace').onclick = () => setMode('place');
   $('modeFind').onclick = () => setMode('find');
   $('undoBtn').onclick = undo;
-  $('doneBtn').onclick = shelfDone;
+  $('doneBtn').onclick = () => { S.lastActivity = Date.now(); shelfDone(); };
+  $('catBtn').onclick = refreshCatalog;
+  $('unkRefresh').onclick = refreshCatalog;
+  ['mL', 'mW', 'mH'].forEach(id => $(id).addEventListener('input', resetManualCheck));
   $('pkgManual').onclick = openManual;
   $('moveNo').onclick = () => { hideActions(); show('gray', 'НЕ РАЗМЕЩЕНА', '', 'Отнесите книгу на её полку', ''); };
   const mh = $('moveHold');
@@ -661,7 +729,7 @@ function bind() {
   $('unkSave').onclick = async () => {
     const code = S.pendingUnknown; hideActions();
     if (!code) return;
-    await enqueue({ id: uid(), ts: new Date().toISOString(), type: 'place', cell: S.cell, barcode: code, pkg: S.lastPkg });
+    await enqueue({ id: uid(), ts: new Date().toISOString(), type: 'place', cell: S.cell, barcode: code, pkg: null });
     show('warn', 'СОХРАНЕНО', '', code, 'Таблица проверит при отправке. Если книги нет — она попадёт в «Ошибки».');
   };
   document.querySelectorAll('#manualSheet .step button').forEach(b => {
@@ -670,7 +738,16 @@ function bind() {
   $('mBack').onclick = closeManual;
   $('mOk').onclick = () => {
     const L = Number($('mL').value), W = Number($('mW').value), H = Number($('mH').value);
-    if (!(L > 0 && W > 0 && H > 0)) return;
+    if (!(L > 0 && W > 0 && H > 0)) { $('mMsg').textContent = 'Все три размера должны быть больше нуля.'; return; }
+    const big = [['Длина', L, MANUAL_MAX.L], ['Ширина', W, MANUAL_MAX.W], ['Высота', H, MANUAL_MAX.H]].filter(([, v, m]) => v > m);
+    const key = `${L}x${W}x${H}`;
+    if (big.length && S.manualOk !== key) {
+      S.manualOk = key; beep('warn');
+      $('mMsg').textContent = 'Проверьте: ' + big.map(([n, v]) => `${n.toLowerCase()} ${v} см`).join(', ') + ' — это очень много. Если всё верно — нажмите ещё раз.';
+      $('mOk').textContent = 'Да, верно';
+      return;
+    }
+    resetManualCheck();
     S.lastManual = { L, W, H };
     closeManual();
     choosePkg({ name: 'Ручная', L, W, H });
@@ -678,12 +755,12 @@ function bind() {
   $('camBtn').onclick = openCamera;
   $('camClose').onclick = closeCamera;
   $('menuBtn').onclick = () => {
-    $('mInfo').textContent = `Версия ${APP_VERSION} · справочник: ${S.catalogAt ? new Date(S.catalogAt).toLocaleString('ru-RU') : 'не загружен'} · книг в справочнике: ${Object.keys(S.catalog).length}`;
+    $('mInfo').textContent = `Версия ${APP_VERSION} · таблица: ${S.table || 'неизвестно'} · справочник: ${S.catalogAt ? new Date(S.catalogAt).toLocaleString('ru-RU') : 'не загружен'} · книг в справочнике: ${Object.keys(S.catalog).length}`;
     $('menuSheet').classList.remove('hidden');
   };
   $('mClose').onclick = () => { $('menuSheet').classList.add('hidden'); focusScan(); };
   $('mSync').onclick = () => { $('menuSheet').classList.add('hidden'); sync(); focusScan(); };
-  $('mCatalog').onclick = () => { $('menuSheet').classList.add('hidden'); loadCatalog(true); focusScan(); };
+  $('mCatalog').onclick = () => { $('menuSheet').classList.add('hidden'); refreshCatalog(); focusScan(); };
   $('mExport').onclick = async () => {
     const q = await DB.qAll();
     const a = document.createElement('a');

@@ -282,7 +282,7 @@ function json_(o) {
 function doGet(e) {
   try {
     var user = auth_(e.parameter.key);
-    if (e.parameter.action === 'ping') return json_({ ok: true, user: user });
+    if (e.parameter.action === 'ping') return json_({ ok: true, user: user, table: ss_().getName() });
     if (e.parameter.action === 'catalog') return json_(catalog_());
     return json_({ ok: false, error: 'неизвестное действие' });
   } catch (err) {
@@ -296,7 +296,7 @@ function catalog_() {
   var archive = readTable_(CFG.ARCHIVE_SHEET, { barcode: CFG.COL.barcode, title: CFG.COL.title, author: CFG.COL.author, cell: CFG.COL.cell });
   var stock = readTable_(CFG.STOCK_SHEET, { barcode: CFG.STOCK_COL.barcode, title: CFG.STOCK_COL.title,
     author: CFG.STOCK_COL.author, cell: CFG.STOCK_COL.cell, article: CFG.STOCK_COL.article, free: CFG.STOCK_COL.free });
-  return { ok: true, version: new Date().toISOString(), packages: packages_(),
+  return { ok: true, version: new Date().toISOString(), table: ss_().getName(), packages: packages_(),
            books: Core.buildCatalog(books, archive, stock) };
 }
 

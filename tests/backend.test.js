@@ -39,6 +39,7 @@ class Sheet {
 }
 function makeSS(sheets) {
   return {
+    getName: () => 'ТЕСТ OzonBooks',
     getSheetByName: n => sheets[n] || null,
     insertSheet: n => (sheets[n] = new Sheet(n, [])),
   };
@@ -169,6 +170,7 @@ assert.ok(sheets['Ошибки'].rows.length - 1 >= 4);
 
 // справочник
 const cat = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'catalog' } }).text);
+assert.strictEqual(cat.table, 'ТЕСТ OzonBooks', 'справочник говорит, какая это таблица');
 assert.ok(cat.ok);
 assert.strictEqual(cat.books['2000000311869'].c, 'С21-П4');
 assert.strictEqual(cat.packages.length, 17);
