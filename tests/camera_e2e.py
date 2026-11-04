@@ -3,7 +3,7 @@ from playwright.sync_api import sync_playwright
 import os; ROOT=os.path.join(os.path.dirname(os.path.abspath(__file__)),'..','docs')
 h=functools.partial(http.server.SimpleHTTPRequestHandler, directory=ROOT); h.log_message=lambda *a: None
 srv=http.server.ThreadingHTTPServer(('127.0.0.1',8793),h); threading.Thread(target=srv.serve_forever,daemon=True).start()
-API='https://script.google.com/macros/s/AKfycbzsrMDosDNc4HsdZyGS-WUeu7bUxzGh0HCho9dZJAC8_p163mjrFFPM3WCPH35hqQ_b/exec'
+API='https://script.google.com/macros/s/AKfycbxzKklN_XquWi7e9ZKml2iGv7lnRI_gpab86hkXPs7SxT-FT3N4hD2cqfMTwvAksUxyPw/exec'
 PK=[{"name":"Развертка - 5 см.","L":22,"W":15,"H":5},{"name":"Ручная","manual":True}]
 BOOKS={"2000000311838":{"t":"Великие женщины","a":"","s":{},"n":1,"q":1,"c":"","d":[22,15,5]}}
 def handle(route, req):

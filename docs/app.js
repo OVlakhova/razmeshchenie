@@ -3,8 +3,8 @@
 // Сканер работает как клавиатура: печатает код и Enter в скрытое поле.
 
 const API = window.RAZM_API ||
-  'https://script.google.com/macros/s/AKfycbzsrMDosDNc4HsdZyGS-WUeu7bUxzGh0HCho9dZJAC8_p163mjrFFPM3WCPH35hqQ_b/exec';
-const APP_VERSION = '1.3';
+  'https://script.google.com/macros/s/AKfycbxzKklN_XquWi7e9ZKml2iGv7lnRI_gpab86hkXPs7SxT-FT3N4hD2cqfMTwvAksUxyPw/exec';
+const APP_VERSION = '1.4';
 const CATALOG_EVERY_MS = 10 * 60 * 1000;
 const SYNC_EVERY_MS = 5000;
 const DOUBLE_SCAN_MS = 1500;
