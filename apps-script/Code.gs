@@ -1,7 +1,9 @@
 /**
  * Размещение книг по ячейкам — скрипт Google-таблицы (бэкенд приложения).
  *
- * Ставится в таблицу через «Расширения → Apps Script», публикуется как веб-приложение.
+ * ОТДЕЛЬНЫЙ проект Apps Script (script.google.com → Новый проект), НЕ внутри таблицы:
+ * в таблице уже есть свой Код.gs (приём карточек с парсинга) со своими doGet/doPost —
+ * в одном проекте они бы конфликтовали. Этот скрипт открывает таблицу по SPREADSHEET_ID.
  * Телефон шлёт СОБЫТИЯ (пик книги в ячейку), скрипт пишет их в «Журнал размещения»
  * и только потом обновляет строку книги. Пишет только в свои столбцы.
  *
@@ -10,9 +12,12 @@
  */
 
 // ---------------------------------------------------------------- настройки
+// Какую таблицу открывать. Адрес таблицы: docs.google.com/spreadsheets/d/<ВОТ ЭТО>/edit
+var SPREADSHEET_ID = '1AW5En8QFA7IRrn9FBgCT-TJU_8Qapbmqs4iojxsCsHE';   // ТЕСТ OzonBooks
+
 var CFG = {
-  BOOKS_SHEET: 'Лист1',              // новые книги: здесь ставим ячейку и габариты
-  ARCHIVE_SHEET: 'Архив 1-7595',     // только для поиска, НЕ меняется
+  BOOKS_SHEET: 'Лист1',              // новые книги: здесь ставим ячейку и габариты (если переименуют — берём первый лист, gid 0)
+  ARCHIVE_PREFIX: 'Архив',           // все листы «Архив…» — только для поиска, НЕ меняются (как в Код.gs таблицы)
   STOCK_SHEET: 'Остатки 1С',         // выгрузка 1С, только для поиска, НЕ меняется
   JOURNAL_SHEET: 'Журнал размещения',
   ERRORS_SHEET: 'Ошибки',
@@ -189,7 +194,21 @@ Core.buildCatalog = function (books, archive, stock) {
 
 // ============================================================ ТАБЛИЦА
 
-function ss_() { return SpreadsheetApp.getActive(); }
+function ss_() { return SPREADSHEET_ID ? SpreadsheetApp.openById(SPREADSHEET_ID) : SpreadsheetApp.getActive(); }
+
+/** Лист новых книг: по имени, а если его переименовали — лист с gid 0 (так его ищет и Код.gs таблицы). */
+function booksSheet_(ss) {
+  ss = ss || ss_();
+  var sh = ss.getSheetByName(CFG.BOOKS_SHEET);
+  if (sh) return sh;
+  var all = ss.getSheets();
+  for (var i = 0; i < all.length; i++) if (all[i].getSheetId() === 0) return all[i];
+  throw new Error('Нет листа «' + CFG.BOOKS_SHEET + '»');
+}
+
+function archiveSheets_(ss) {
+  return (ss || ss_()).getSheets().filter(function (sh) { return sh.getName().indexOf(CFG.ARCHIVE_PREFIX) === 0; });
+}
 
 function headerMap_(sheet) {
   var lastCol = sheet.getLastColumn();
@@ -204,8 +223,8 @@ function need_(map, name, sheetName) {
   return map[name];
 }
 
-function readTable_(sheetName, colNames) {
-  var sh = ss_().getSheetByName(sheetName);
+function readTable_(sheetOrName, colNames) {
+  var sh = typeof sheetOrName === 'string' ? ss_().getSheetByName(sheetOrName) : sheetOrName;
   if (!sh || sh.getLastRow() < 2) return [];
   var map = headerMap_(sh);
   var vals = sh.getRange(2, 1, sh.getLastRow() - 1, sh.getLastColumn()).getValues();
@@ -239,7 +258,7 @@ function auth_(key) {
 // ------------------------------------------------------------ первый запуск
 function setup() {
   var ss = ss_();
-  var books = ss.getSheetByName(CFG.BOOKS_SHEET);
+  var books = booksSheet_(ss);
   var map = headerMap_(books);
   ['barcode', 'cell', 'qty', 'title', 'L', 'W', 'H'].forEach(function (k) { need_(map, CFG.COL[k], CFG.BOOKS_SHEET); });
   ['article', 'pkg', 'placedAt', 'placedBy'].forEach(function (k) {
@@ -291,9 +310,13 @@ function doGet(e) {
 }
 
 function catalog_() {
-  var books = readTable_(CFG.BOOKS_SHEET, { barcode: CFG.COL.barcode, title: CFG.COL.title, author: CFG.COL.author,
+  var ss = ss_();
+  var books = readTable_(booksSheet_(ss), { barcode: CFG.COL.barcode, title: CFG.COL.title, author: CFG.COL.author,
     cell: CFG.COL.cell, qty: CFG.COL.qty, L: CFG.COL.L, W: CFG.COL.W, H: CFG.COL.H, article: CFG.COL.article });
-  var archive = readTable_(CFG.ARCHIVE_SHEET, { barcode: CFG.COL.barcode, title: CFG.COL.title, author: CFG.COL.author, cell: CFG.COL.cell });
+  var archive = [];
+  archiveSheets_(ss).forEach(function (sh) {
+    archive = archive.concat(readTable_(sh, { barcode: CFG.COL.barcode, title: CFG.COL.title, author: CFG.COL.author, cell: CFG.COL.cell }));
+  });
   var stock = readTable_(CFG.STOCK_SHEET, { barcode: CFG.STOCK_COL.barcode, title: CFG.STOCK_COL.title,
     author: CFG.STOCK_COL.author, cell: CFG.STOCK_COL.cell, article: CFG.STOCK_COL.article, free: CFG.STOCK_COL.free });
   return { ok: true, version: new Date().toISOString(), table: ss_().getName(), packages: packages_(),
@@ -321,7 +344,7 @@ function doPost(e) {
 
 function processEvents_(user, device, events) {
   var ss = ss_();
-  var books = ss.getSheetByName(CFG.BOOKS_SHEET);
+  var books = booksSheet_(ss);
   var journal = ss.getSheetByName(CFG.JOURNAL_SHEET);
   var errors = ss.getSheetByName(CFG.ERRORS_SHEET);
   var map = headerMap_(books);

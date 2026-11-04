@@ -6,8 +6,11 @@ const vm = require('vm');
 const assert = require('assert');
 
 // ---------- поддельные SpreadsheetApp / сервисы ----------
+let gid = 0;
 class Sheet {
-  constructor(name, rows) { this.name = name; this.rows = rows.map(r => r.slice()); }
+  constructor(name, rows) { this.name = name; this.rows = rows.map(r => r.slice()); this.id = gid++; }
+  getName() { return this.name; }
+  getSheetId() { return this.id; }
   getLastRow() { return this.rows.length; }
   getLastColumn() { return Math.max(0, ...this.rows.map(r => r.length)); }
   getRange(r, c, nr = 1, nc = 1) {
@@ -41,6 +44,7 @@ function makeSS(sheets) {
   return {
     getName: () => 'ТЕСТ OzonBooks',
     getSheetByName: n => sheets[n] || null,
+    getSheets: () => Object.values(sheets),
     insertSheet: n => (sheets[n] = new Sheet(n, [])),
   };
 }
@@ -99,7 +103,8 @@ const books = new Sheet('Лист1', [H,
   [5, 'Дубль 2', '', '', 2000000311845, 1, '', '', '', ''],
 ]);
 const sheets = { 'Лист1': books };
-ctx.SpreadsheetApp = { getActive: () => makeSS(sheets) };
+ctx.SpreadsheetApp = { getActive: () => { throw new Error('скрипт отдельный — getActive() нельзя'); },
+                      openById: id => { assert.strictEqual(id, vm.runInContext('SPREADSHEET_ID', ctx)); return makeSS(sheets); } };
 vm.runInContext('setup()', ctx);
 const keys = JSON.parse(props.DEVICE_KEYS);
 const olgaKey = Object.keys(keys).find(k => keys[k] === 'Ольга');
@@ -168,11 +173,23 @@ const journal = sheets['Журнал размещения'];
 assert.strictEqual(journal.rows.length - 1, 9, 'все 9 событий в журнале, повтор e1 не задвоен');
 assert.ok(sheets['Ошибки'].rows.length - 1 >= 4);
 
-// справочник
+// справочник: все листы «Архив…» (новый архив подхватывается сам)
+const AH = ['', 'Название книги', 'Авторы', 'Место хранения', 'НАШ ШТРИХКОД'];
+sheets['Архив 1-7595'] = new Sheet('Архив 1-7595', [AH, [1, 'Старая 1', '', 'С1-П1', 2000000000111]]);
+sheets['Архив 7596-9000'] = new Sheet('Архив 7596-9000', [AH, [7596, 'Старая 2', '', 'С2-П2', 2000000000222]]);
+sheets['Журнал не архив'] = new Sheet('Журнал не архив', [AH, [1, 'Чужое', '', 'С9-П9', 2000000000333]]);
 const cat = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'catalog' } }).text);
 assert.strictEqual(cat.table, 'ТЕСТ OzonBooks', 'справочник говорит, какая это таблица');
 assert.ok(cat.ok);
 assert.strictEqual(cat.books['2000000311869'].c, 'С21-П4');
 assert.strictEqual(cat.packages.length, 17);
+assert.strictEqual(cat.books['2000000000111'].s.arch, 'С1-П1', 'первый архив');
+assert.strictEqual(cat.books['2000000000222'].s.arch, 'С2-П2', 'второй архив подхвачен по названию «Архив…»');
+assert.ok(!cat.books['2000000000333'], 'лист не «Архив…» не читается');
+
+// Лист1 переименовали — скрипт находит его по gid 0
+sheets['Книги'] = sheets['Лист1']; delete sheets['Лист1'];
+const cat2 = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'catalog' } }).text);
+assert.ok(cat2.ok && cat2.books['2000000311869'], 'переименованный Лист1 найден по gid 0');
 
 console.log('Все проверки пройдены:', 'Core + события + отмена + перемещение + справочник');
