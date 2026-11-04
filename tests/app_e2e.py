@@ -196,6 +196,18 @@ with sync_playwright() as p:
     scan('2000000311845')
     check('СНАЧАЛА ЯЧЕЙКА' in st(), 'после «Полка готова» книга без новой ячейки не принимается')
 
+    # обновили страницу посреди полки — список «На этой полке» и отмена на месте
+    scan('991019002'); page.wait_for_timeout(1600)
+    scan('2000000311869'); page.wait_for_timeout(1600)
+    scan('2000000311845'); page.wait_for_timeout(300)
+    page.locator('#pkgGrid button', has_text='201·2').click(); page.wait_for_timeout(150)
+    page.reload(); page.wait_for_timeout(1200)
+    check(page.inner_text('#cellName') == 'С19-П2' and page.inner_text('#shelfCount') == '1' and 'Книга с габаритами' in page.inner_text('#shelf'),
+          'после обновления страницы список полки на месте: ' + page.inner_text('#shelfCount'))
+    check('ВОССТАНОВЛЕН' in st() and 'Третья книга' in st(), 'после обновления последний пик восстановлен')
+    page.click('#doneBtn'); page.wait_for_timeout(1500)
+    check('2 книги' in st() and 'Всё отправлено' in st(), 'после обновления «Полка готова» считает обе книги: ' + st().replace('\n', ' | '))
+
     # ручная упаковка: опечатка
     scan('991019002'); page.wait_for_timeout(1600)
     scan('2000000311869'); page.wait_for_timeout(150)

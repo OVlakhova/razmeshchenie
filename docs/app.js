@@ -4,7 +4,7 @@
 
 const API = window.RAZM_API ||
   'https://script.google.com/macros/s/AKfycbxzKklN_XquWi7e9ZKml2iGv7lnRI_gpab86hkXPs7SxT-FT3N4hD2cqfMTwvAksUxyPw/exec';
-const APP_VERSION = '1.4';
+const APP_VERSION = '1.5';
 const CATALOG_EVERY_MS = 10 * 60 * 1000;
 const SYNC_EVERY_MS = 5000;
 const DOUBLE_SCAN_MS = 1500;
@@ -288,6 +288,7 @@ async function startCurrent(code, book, type, warn) {
   S.counts[code.code] = (S.counts[code.code] || 0) + 1;
   S.current = { ev, book, needsPkg, fromTable, prevC: book.c || '', touchedAt: Date.now() };
   await DB.set('current', S.current);
+  await saveSession();
   const n = S.counts[code.code], q = book.q || 1;
   let lbl = book.c === S.cell ? 'УЖЕ НА ЭТОЙ ПОЛКЕ' : 'НОВОЕ МЕСТО · ' + S.cell, kind = 'ok';
   let meta = [book.a, code.code].filter(Boolean).join(' · ');
@@ -331,6 +332,7 @@ async function choosePkg(p) {
     const it = S.editShelf; S.editShelf = null;
     it.pkg = Object.assign({}, p);
     S.pkgByCode[it.barcode] = Object.assign({}, p);
+    await saveSession();
     await enqueue({ id: uid(), ts: new Date().toISOString(), type: 'place', cell: S.cell, barcode: it.barcode, pkg: it.pkg });
     S.lastPkg = Object.assign({}, p);
     renderShelf();
@@ -348,6 +350,7 @@ async function undo() {
     S.counts[S.current.ev.barcode]--;
     const t = S.current.book.t;
     S.current = null; await DB.set('current', null);
+    await saveSession();
     renderPackages();
     return show('gray', 'ОТМЕНЕНО', '', t, 'Пик удалён, в таблицу ничего не ушло');
   }
@@ -359,6 +362,7 @@ async function undo() {
   if (q.find(e => e.id === last.id)) await DB.qDel(last.id);       // ещё не отправлен — просто удалить
   else await enqueue({ id: uid(), ts: new Date().toISOString(), type: 'undo', undoOf: last.id });
   S.queued = (await DB.qAll()).length;
+  await saveSession();
   renderShelf(); renderTop();
   show('gray', 'ОТМЕНЕНО', '', last.title, 'Таблица вернёт строку как было');
 }
@@ -465,7 +469,9 @@ function renderTop() {
 function hhmm(iso) { const d = new Date(iso); return isNaN(d) ? '—' : d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }); }
 
 async function saveSession() {
-  await DB.set('session', { cell: S.cell, lastPkg: S.lastPkg, lastActivity: S.lastActivity });
+  // список «На этой полке» тоже хранится в телефоне — переживает обновление страницы и перезапуск
+  await DB.set('session', { cell: S.cell, lastPkg: S.lastPkg, lastActivity: S.lastActivity,
+                            shelf: S.shelf.slice(0, 200), counts: S.counts, pkgByCode: S.pkgByCode });
 }
 
 /** Обновить справочник по кнопке; если на экране неизвестный штрихкод — сразу проверить его снова. */
@@ -663,7 +669,10 @@ async function start() {
   const cat = await DB.get('catalog');
   if (cat) { S.catalog = cat.books || {}; S.packages = cat.packages || []; S.catalogAt = cat.at || ''; S.table = cat.table || ''; await overlayQueue(); }
   const sess = await DB.get('session');
-  if (sess) { S.cell = sess.cell || ''; S.lastPkg = sess.lastPkg || null; S.lastActivity = sess.lastActivity || 0; }
+  if (sess) {
+    S.cell = sess.cell || ''; S.lastPkg = sess.lastPkg || null; S.lastActivity = sess.lastActivity || 0;
+    if (S.cell) { S.shelf = sess.shelf || []; S.counts = sess.counts || {}; S.pkgByCode = sess.pkgByCode || {}; }
+  }
   S.current = await DB.get('current') || null;
   S.queued = (await DB.qAll()).length;
 
