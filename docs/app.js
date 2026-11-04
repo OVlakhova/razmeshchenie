@@ -4,11 +4,12 @@
 
 const API = window.RAZM_API ||
   'https://script.google.com/macros/s/AKfycbzsrMDosDNc4HsdZyGS-WUeu7bUxzGh0HCho9dZJAC8_p163mjrFFPM3WCPH35hqQ_b/exec';
-const APP_VERSION = '1.1';
+const APP_VERSION = '1.2';
 const CATALOG_EVERY_MS = 10 * 60 * 1000;
 const SYNC_EVERY_MS = 5000;
 const DOUBLE_SCAN_MS = 1500;
 const HOLD_MS = 2000;
+const autoCloseMs = () => window.RAZM_AUTO_CLOSE_MS || 5 * 60 * 1000;   // последняя книга закрывается сама через 5 минут
 
 // ------------------------------------------------------------ коды
 const Codes = {
@@ -258,7 +259,7 @@ async function startCurrent(code, book, type, warn) {
     if (S.lastPkg) ev.pkg = Object.assign({}, S.lastPkg); else needsPkg = true;
   }
   S.counts[code.code] = (S.counts[code.code] || 0) + 1;
-  S.current = { ev, book, needsPkg, fromTable, prevC: book.c || '' };
+  S.current = { ev, book, needsPkg, fromTable, prevC: book.c || '', touchedAt: Date.now() };
   await DB.set('current', S.current);
   const n = S.counts[code.code], q = book.q || 1;
   let lbl = book.c === S.cell ? 'УЖЕ НА ЭТОЙ ПОЛКЕ' : 'НОВОЕ МЕСТО · ' + S.cell, kind = 'ok';
@@ -296,6 +297,7 @@ async function choosePkg(p) {
   if (S.current) {
     S.current.ev.pkg = Object.assign({}, p);
     S.current.needsPkg = false;
+    S.current.touchedAt = Date.now();
     await DB.set('current', S.current);
     show(stateKind(), $('stLbl').textContent, '', S.current.book.t, $('stMeta').textContent, '');
   } else if (S.editShelf) {      // исправить упаковку уже поставленной книги
@@ -330,6 +332,41 @@ async function undo() {
   S.queued = (await DB.qAll()).length;
   renderShelf(); renderTop();
   show('gray', 'ОТМЕНЕНО', '', last.title, 'Таблица вернёт строку как было');
+}
+
+// ------------------------------------------------------------ конец полки
+/** «Полка готова»: записать последнюю книгу, отправить, показать итог и отпустить ячейку. */
+async function shelfDone() {
+  hideActions();
+  if (!S.cell) return show('gray', 'ЯЧЕЙКА НЕ ВЫБРАНА', '', 'Пикните этикетку ячейки', '');
+  if (!await commitCurrent()) return;
+  const cell = S.cell, n = S.shelf.length;
+  S.cell = ''; S.shelf = []; S.counts = {}; S.editShelf = null;
+  await DB.set('session', { cell: '', lastPkg: S.lastPkg });
+  render();
+  beep('ok');
+  show('ok', 'ПОЛКА ГОТОВА', cell, `${n} ${plural(n, 'книга', 'книги', 'книг')}`, 'Отправляю в таблицу…');
+  for (let i = 0; S.syncing && i < 50; i++) await new Promise(r => setTimeout(r, 200));   // дождаться идущей отправки
+  await sync();
+  const left = S.queued;
+  show(left ? 'warn' : 'ok', 'ПОЛКА ГОТОВА', cell, `${n} ${plural(n, 'книга', 'книги', 'книг')}`,
+       left ? `Ждут отправки: ${left}. Отправятся сами, когда будет сеть — приложение не удаляйте.` : 'Всё отправлено в таблицу. Можно уходить.');
+}
+
+function plural(n, one, few, many) {
+  const a = n % 10, b = n % 100;
+  return a === 1 && b !== 11 ? one : a >= 2 && a <= 4 && (b < 12 || b > 14) ? few : many;
+}
+
+/** Последняя книга, после которой 5 минут ничего не пикали, записывается сама. */
+async function autoClose() {
+  const c = S.current;
+  if (!c || (c.needsPkg && !c.ev.pkg)) return;           // без упаковки не закрываем — ждём выбора
+  if (Date.now() - (c.touchedAt || Date.parse(c.ev.ts)) < autoCloseMs()) return;
+  if (!await commitCurrent()) return;
+  show('ok', 'ПОСЛЕДНЯЯ КНИГА ЗАПИСАНА', '', c.book.t, '5 минут не было пиков — книга закрыта автоматически. Ячейка ' + S.cell + ' по-прежнему активна.');
+  renderPackages();
+  sync();
 }
 
 // ------------------------------------------------------------ «Где книга?»
@@ -427,6 +464,7 @@ function renderProblems() {
 
 function render() {
   $('cellName').textContent = S.cell || '—';
+  $('doneBtn').classList.toggle('hidden', !S.cell);
   $('cellbar').classList.toggle('hidden', S.mode !== 'place');
   $('modePlace').classList.toggle('on', S.mode === 'place');
   $('modeFind').classList.toggle('on', S.mode === 'find');
@@ -579,6 +617,8 @@ function enterMain() {
   loadCatalog(!S.catalogAt);
   sync();
   setInterval(sync, SYNC_EVERY_MS);
+  setInterval(autoClose, 15 * 1000);
+  autoClose();
   setInterval(() => loadCatalog(false), 60 * 1000);
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 }
@@ -605,13 +645,14 @@ function bind() {
   });
   scan.addEventListener('blur', () => setTimeout(focusScan, 150));
   document.addEventListener('click', () => setTimeout(focusScan, 50));
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { focusScan(); sync(); } });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { focusScan(); autoClose().then(sync); } });
   window.addEventListener('online', () => { S.online = true; sync(); loadCatalog(false); });
   window.addEventListener('offline', () => { S.online = false; renderTop(); });
 
   $('modePlace').onclick = () => setMode('place');
   $('modeFind').onclick = () => setMode('find');
   $('undoBtn').onclick = undo;
+  $('doneBtn').onclick = shelfDone;
   $('pkgManual').onclick = openManual;
   $('moveNo').onclick = () => { hideActions(); show('gray', 'НЕ РАЗМЕЩЕНА', '', 'Отнесите книгу на её полку', ''); };
   const mh = $('moveHold');

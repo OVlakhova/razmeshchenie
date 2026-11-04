@@ -26,6 +26,8 @@ button{font-family:inherit;color:inherit}
 .cellbar{display:flex;align-items:center;justify-content:space-between;margin:8px 12px 0;padding:10px 14px;background:var(--dark);color:#fff;border-radius:14px}
 .cellbar small{display:block;font-size:13px;color:#d4d4d8}
 .cellbar .cell{font-size:34px;font-weight:800;letter-spacing:.02em}
+.cellside{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.done{height:44px;padding:0 16px;border:0;border-radius:10px;background:#fff;color:var(--dark);font-size:16px;font-weight:800}
 .status{margin:10px 12px 0;border-radius:14px;padding:12px 14px;border:2px solid var(--line);background:#fff;display:flex;flex-direction:column;gap:6px}
 .status .lbl{font-size:15px;font-weight:800;letter-spacing:.04em}
 .status .big{font-size:30px;font-weight:800}
@@ -105,7 +107,8 @@ button{font-family:inherit;color:inherit}
     </div>
     <div class="cellbar" id="cellbar">
       <div><small>Ячейка</small><span class="cell" id="cellName">—</span></div>
-      <span>На полке: <b id="shelfCount">0</b></span>
+      <div class="cellside"><span>На полке: <b id="shelfCount">0</b></span>
+        <button id="doneBtn" class="done hidden" type="button">Полка готова</button></div>
     </div>
     <div id="status" class="status">
       <span class="lbl" id="stLbl">ГОТОВО</span>
