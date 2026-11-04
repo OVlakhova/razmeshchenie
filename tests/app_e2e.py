@@ -3,7 +3,7 @@
 import json, threading, http.server, functools, os, sys
 from playwright.sync_api import sync_playwright
 
-ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'app')
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'docs')
 PORT = 8791
 API = 'https://script.google.com/macros/s/AKfycbzsrMDosDNc4HsdZyGS-WUeu7bUxzGh0HCho9dZJAC8_p163mjrFFPM3WCPH35hqQ_b/exec'
 
