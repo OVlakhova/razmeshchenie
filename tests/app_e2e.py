@@ -34,8 +34,13 @@ def handle(route, request):
             return route.fulfill(status=200, content_type='application/json', body=json.dumps({"ok": False, "error": "Неизвестный ключ устройства"}))
         if 'action=ping' in q:
             return route.fulfill(status=200, content_type='application/json', body=json.dumps({"ok": True, "user": "Ольга"}))
+        # как настоящая таблица: принятые пики уже записаны в «Место хранения»
+        books = json.loads(json.dumps(BOOKS))
+        for e in posted:
+            if e.get('type') in ('place', 'move') and e.get('barcode') in books and books[e['barcode']].get('n'):
+                books[e['barcode']]['c'] = e['cell']
         return route.fulfill(status=200, content_type='application/json',
-                             body=json.dumps({"ok": True, "version": "2026-11-04T09:00:00Z", "packages": PK, "books": BOOKS}))
+                             body=json.dumps({"ok": True, "version": "2026-11-04T09:00:00Z", "packages": PK, "books": books}))
     body = json.loads(request.post_data)
     posted.extend(body['events'])
     res = [{"id": e["id"], "result": "ok" if e.get("type") != "undo" else "отменено"} for e in body['events']]

@@ -4,7 +4,7 @@
 
 const API = window.RAZM_API ||
   'https://script.google.com/macros/s/AKfycbzsrMDosDNc4HsdZyGS-WUeu7bUxzGh0HCho9dZJAC8_p163mjrFFPM3WCPH35hqQ_b/exec';
-const APP_VERSION = '1.0';
+const APP_VERSION = '1.1';
 const CATALOG_EVERY_MS = 10 * 60 * 1000;
 const SYNC_EVERY_MS = 5000;
 const DOUBLE_SCAN_MS = 1500;
@@ -469,9 +469,84 @@ function holdDown() {
 }
 function holdUp() { clearTimeout(holdTimer); cancelAnimationFrame(holdRaf); $('holdFill').style.width = '0'; }
 
+// ------------------------------------------------------------ камера (если сканера нет под рукой)
+// Один пик за раз: прочитала код -> закрылась -> код обработан как пик сканера.
+const ZXING_URLS = ['https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js',
+                    'https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js',
+                    'https://cdn.jsdelivr.net/npm/@zxing/library@0.20.0/umd/index.min.js'];
+const Cam = { stream: null, raf: 0, reader: null, busy: false };
+
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    const el = document.createElement('script'); el.src = src; el.async = true;
+    el.onload = res; el.onerror = rej; document.head.appendChild(el);
+  });
+}
+
+async function zxing() {
+  if (window.ZXing) return window.ZXing;
+  for (const u of ZXING_URLS) { try { await loadScript(u); if (window.ZXing) return window.ZXing; } catch (e) {} }
+  throw new Error('не удалось загрузить распознавание (нужен интернет при первом запуске камеры)');
+}
+
+async function nativeDetector() {
+  if (!('BarcodeDetector' in window)) return null;
+  try {
+    const fmts = await window.BarcodeDetector.getSupportedFormats();
+    const want = ['ean_13', 'code_128', 'ean_8', 'upc_a'].filter(f => fmts.includes(f));
+    return want.includes('ean_13') && want.includes('code_128') ? new window.BarcodeDetector({ formats: want }) : null;
+  } catch (e) { return null; }
+}
+
+async function openCamera() {
+  if (Cam.busy) return;
+  Cam.busy = true;
+  $('camMsg').textContent = 'Наведите камеру на штрихкод';
+  $('camSheet').classList.remove('hidden');
+  const video = $('camVideo');
+  const done = code => { closeCamera(); if (code) onScan(code); };
+  try {
+    const det = await nativeDetector();
+    if (det) {
+      Cam.stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment', width: { ideal: 1280 } }, audio: false });
+      video.srcObject = Cam.stream; await video.play();
+      let last = 0;
+      const loop = async t => {
+        if (!Cam.busy) return;
+        if (t - last > 150 && video.readyState >= 2) {
+          last = t;
+          try { const r = await det.detect(video); if (r && r[0] && r[0].rawValue) return done(r[0].rawValue); } catch (e) {}
+        }
+        Cam.raf = requestAnimationFrame(loop);
+      };
+      Cam.raf = requestAnimationFrame(loop);
+    } else {
+      const Z = await zxing();
+      const hints = new Map();
+      hints.set(Z.DecodeHintType.POSSIBLE_FORMATS, [Z.BarcodeFormat.EAN_13, Z.BarcodeFormat.CODE_128, Z.BarcodeFormat.EAN_8, Z.BarcodeFormat.UPC_A]);
+      Cam.reader = new Z.BrowserMultiFormatReader(hints);
+      await Cam.reader.decodeFromConstraints({ video: { facingMode: 'environment' } }, video, res => { if (res && Cam.busy) done(res.getText()); });
+    }
+  } catch (e) {
+    $('camMsg').textContent = 'Камера недоступна: ' + (e.message || e.name || e) + '. Разрешите доступ к камере в настройках Chrome.';
+  }
+}
+
+function closeCamera() {
+  Cam.busy = false;
+  cancelAnimationFrame(Cam.raf);
+  try { Cam.reader && Cam.reader.reset(); } catch (e) {}
+  Cam.reader = null;
+  if (Cam.stream) Cam.stream.getTracks().forEach(t => t.stop());
+  Cam.stream = null;
+  $('camVideo').srcObject = null;
+  $('camSheet').classList.add('hidden');
+  focusScan();
+}
+
 // поле сканера всегда в фокусе
 function focusScan() {
-  if (!$('manualSheet').classList.contains('hidden') || !$('menuSheet').classList.contains('hidden')) return;
+  if (!$('manualSheet').classList.contains('hidden') || !$('menuSheet').classList.contains('hidden') || !$('camSheet').classList.contains('hidden')) return;
   if (!$('mainView').classList.contains('hidden')) $('scan').focus({ preventScroll: true });
 }
 
@@ -559,6 +634,8 @@ function bind() {
     closeManual();
     choosePkg({ name: 'Ручная', L, W, H });
   };
+  $('camBtn').onclick = openCamera;
+  $('camClose').onclick = closeCamera;
   $('menuBtn').onclick = () => {
     $('mInfo').textContent = `Версия ${APP_VERSION} · справочник: ${S.catalogAt ? new Date(S.catalogAt).toLocaleString('ru-RU') : 'не загружен'} · книг в справочнике: ${Object.keys(S.catalog).length}`;
     $('menuSheet').classList.remove('hidden');

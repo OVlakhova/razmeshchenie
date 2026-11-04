@@ -7,3 +7,4 @@
 - `apps-script/Code.gs` — скрипт таблицы (бэкенд), установка: `apps-script/УСТАНОВКА.md`
 - `tests/backend.test.js` — проверки скрипта вне Google: `node tests/backend.test.js`
 - `tests/app_e2e.py` — сквозная проверка приложения в Chromium: `python3 tests/app_e2e.py`
+- `tests/camera_e2e.py` — проверка пика камерой (с подменённой камерой): `python3 tests/camera_e2e.py`

@@ -59,7 +59,14 @@ button{font-family:inherit;color:inherit}
 .spacer{flex:1}
 .bottom{position:sticky;bottom:0;display:flex;gap:10px;padding:12px;background:#fff;border-top:1px solid var(--line)}
 .undo{flex:1;height:56px;border:2px solid var(--bad);border-radius:12px;background:#fff;color:var(--bad);font-size:16px;font-weight:700}
-.menu-btn{width:110px;height:56px;border:1px solid #d4d4cf;border-radius:12px;background:#fff;font-size:16px;font-weight:600}
+.cam-btn{width:100px;height:56px;border:1px solid #d4d4cf;border-radius:12px;background:#fff;font-size:16px;font-weight:600}
+.cam{position:fixed;inset:0;background:#000;z-index:20;display:flex;flex-direction:column}
+.cam video{flex:1;width:100%;object-fit:cover;min-height:0}
+.cam .frame{position:absolute;left:8%;right:8%;top:35%;height:22%;border:3px solid #fff;border-radius:14px;box-shadow:0 0 0 2000px rgba(0,0,0,.35)}
+.cam .bar{padding:14px;display:flex;flex-direction:column;gap:10px;background:#18181b}
+.cam .bar p{margin:0;color:#e4e4e7;font-size:16px;text-align:center}
+.cam .bar button{height:56px;border:0;border-radius:12px;background:#fff;font-size:17px;font-weight:700}
+.menu-btn{width:90px;height:56px;border:1px solid #d4d4cf;border-radius:12px;background:#fff;font-size:16px;font-weight:600}
 .sheet{position:fixed;inset:0;background:rgba(0,0,0,.35);display:flex;align-items:flex-end;justify-content:center;z-index:10}
 .sheet .box{width:100%;max-width:560px;background:var(--bg);border-radius:18px 18px 0 0;padding:16px;display:flex;flex-direction:column;gap:12px}
 .sheet h2{margin:0;font-size:19px}
@@ -125,6 +132,7 @@ button{font-family:inherit;color:inherit}
     <div class="spacer"></div>
     <div class="bottom">
       <button id="undoBtn" class="undo" type="button">Отменить последний</button>
+      <button id="camBtn" class="cam-btn" type="button">Камера</button>
       <button id="menuBtn" class="menu-btn" type="button">Меню</button>
     </div>
   </section>
@@ -149,6 +157,15 @@ button{font-family:inherit;color:inherit}
     <button id="mKey" type="button">Сменить ключ устройства</button>
     <p id="mInfo" style="margin:0;font-size:13px;color:#52525b"></p>
     <button id="mClose" type="button">Закрыть</button>
+  </div>
+</div>
+
+<div id="camSheet" class="cam hidden">
+  <video id="camVideo" playsinline muted autoplay></video>
+  <div class="frame" aria-hidden="true"></div>
+  <div class="bar">
+    <p id="camMsg">Наведите камеру на штрихкод</p>
+    <button id="camClose" type="button">Закрыть</button>
   </div>
 </div>
 
