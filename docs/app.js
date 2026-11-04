@@ -4,7 +4,7 @@
 
 const API = window.RAZM_API ||
   'https://script.google.com/macros/s/AKfycbxzKklN_XquWi7e9ZKml2iGv7lnRI_gpab86hkXPs7SxT-FT3N4hD2cqfMTwvAksUxyPw/exec';
-const APP_VERSION = '1.5';
+const APP_VERSION = '1.6';
 const CATALOG_EVERY_MS = 10 * 60 * 1000;
 const SYNC_EVERY_MS = 5000;
 const DOUBLE_SCAN_MS = 1500;
@@ -213,6 +213,7 @@ async function onScan(raw) {
   if (code.code === S.lastScan.code && now - S.lastScan.at < DOUBLE_SCAN_MS) return;  // двойной пик
   S.lastScan = { code: code.code, at: now };
   S.lastActivity = now;
+  S.lastUndoAt = 0; S.undoArmed = null;
   if (S.busy) { beep('bad'); show('warn', 'ПОДОЖДИТЕ', '', 'Обновляю справочник', 'Пикните ещё раз через пару секунд'); S.lastScan = { code: '', at: 0 }; return; }
   hideActions();
   const accepted = await handleScan(code);
@@ -272,6 +273,14 @@ async function handleScan(code) {
     $('moveActions').classList.remove('hidden');
     $('moveNo').textContent = `Понятно, отнесу на ${book.c}`;
     return false;
+  }
+  const q = book.q || 1;
+  if ((S.counts[code.code] || 0) >= q) {   // эту книгу уже пикнули на этой полке столько раз, сколько экземпляров в таблице
+    beep('warn');
+    show('warn', 'УЖЕ ПИКНУТА', S.cell, book.t,
+         q > 1 ? `Все ${q} экземпляра уже пикнуты. Повторный пик не записан.` : 'Эта книга уже пикнута на этой полке. Повторный пик не записан — отменять ничего не нужно.',
+         'Если таких книг правда больше — поправьте «Количество» в таблице.');
+    return true;
   }
   await startCurrent(code, book, 'place', warn);
   return true;
@@ -345,7 +354,16 @@ async function choosePkg(p) {
 
 async function undo() {
   hideActions();
-  S.lastActivity = Date.now();
+  const now = Date.now();
+  S.lastActivity = now;
+  // вторая отмена подряд — только после подтверждения: иначе легко «съесть» соседнюю книгу
+  if (!S.current && S.shelf.length && S.lastUndoAt && now - S.lastUndoAt < 15000 && S.undoArmed !== S.shelf[0].id) {
+    S.undoArmed = S.shelf[0].id;
+    beep('warn');
+    return show('warn', 'ОТМЕНИТЬ ЕЩЁ ОДНУ?', '', S.shelf[0].title,
+                'Вы только что уже отменили пик. Если нужно отменить и эту книгу — нажмите «Отменить» ещё раз.');
+  }
+  S.lastUndoAt = now; S.undoArmed = null;
   if (S.current) {
     S.counts[S.current.ev.barcode]--;
     const t = S.current.book.t;
@@ -355,7 +373,7 @@ async function undo() {
     return show('gray', 'ОТМЕНЕНО', '', t, 'Пик удалён, в таблицу ничего не ушло');
   }
   const last = S.shelf.shift();
-  if (!last) return show('gray', 'НЕЧЕГО ОТМЕНЯТЬ', '', '', '');
+  if (!last) { S.lastUndoAt = 0; return show('gray', 'НЕЧЕГО ОТМЕНЯТЬ', '', '', ''); }
   S.counts[last.barcode] = Math.max(0, (S.counts[last.barcode] || 1) - 1);
   if (S.catalog[last.barcode]) S.catalog[last.barcode].c = last.prevC;
   const q = await DB.qAll();

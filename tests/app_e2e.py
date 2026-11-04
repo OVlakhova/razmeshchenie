@@ -126,7 +126,9 @@ with sync_playwright() as p:
     page.click('#moveNo'); page.wait_for_timeout(100)
 
     page.click('#undoBtn'); page.wait_for_timeout(200)
-    check('ОТМЕНЕНО' in st(), 'отмена последнего')
+    check('ОТМЕНИТЬ ЕЩЁ ОДНУ?' in st(), 'вторая отмена подряд просит подтверждения: ' + st().replace('\n', ' | '))
+    page.click('#undoBtn'); page.wait_for_timeout(200)
+    check('ОТМЕНЕНО' in st(), 'отмена последнего после подтверждения')
 
     # без сети
     ctx.set_offline(True); NET["down"] = True
@@ -199,6 +201,11 @@ with sync_playwright() as p:
     # обновили страницу посреди полки — список «На этой полке» и отмена на месте
     scan('991019002'); page.wait_for_timeout(1600)
     scan('2000000311869'); page.wait_for_timeout(1600)
+    n1 = len(posted)
+    scan('2000000311869'); page.wait_for_timeout(1600)
+    check('УЖЕ ПИКНУТА' in st() and 'Повторный пик не записан' in st(), 'повторный пик той же книги не записывается: ' + st().replace('\n', ' | '))
+    page.wait_for_timeout(5500)
+    check(len([e for e in posted[n1:] if e.get('barcode') == '2000000311869']) == 1, 'в таблицу ушёл один пик, а не два')
     scan('2000000311845'); page.wait_for_timeout(300)
     page.locator('#pkgGrid button', has_text='201·2').click(); page.wait_for_timeout(150)
     page.reload(); page.wait_for_timeout(1200)
