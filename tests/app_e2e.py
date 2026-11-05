@@ -24,6 +24,14 @@ BOOKS = {
   "9785991035781": {"t": "Старая из 1С", "a": "Б", "s": {"1c": "С17-П4", "arch": "С17-П4"}, "f": 1, "ar": "С17-П4_9785991035781"},
 }
 posted = []
+ORDERS = [
+  {"id": 1, "article": "С21-П4_2000000311838", "barcode": "2000000311838", "nmId": 1, "createdAt": "2026-11-06T08:00:00Z", "price": 50000, "title": "Книга для проверки без сети", "brand": "АСТ", "photo": f"http://127.0.0.1:8791/icon-192.png"},
+  {"id": 2, "article": "старый-артикул", "barcode": "", "nmId": 2, "createdAt": "2026-11-06T07:00:00Z", "price": 30000, "title": "Без места", "brand": "", "photo": ""},
+  {"id": 3, "article": "С17-П4_9785991035781", "barcode": "9785991035781", "nmId": 3, "createdAt": "2026-11-06T06:00:00Z", "price": 131100, "title": "Старая из 1С", "brand": "Современник", "photo": ""},
+  {"id": 4, "article": "С4-П2_2000000777777", "barcode": "2000000777777", "nmId": 4, "createdAt": "2026-11-06T05:00:00Z", "price": 0, "title": "Нет в справочнике", "brand": "", "photo": ""},
+  {"id": 5, "article": "С5-П1_9785480000566", "barcode": "9785480000566", "nmId": 5, "createdAt": "2026-11-06T04:00:00Z", "price": 20000, "title": "Уже на другой полке", "brand": "", "photo": ""},
+  {"id": 6, "article": "С4-П1_2000000888888", "barcode": "2000000888888", "nmId": 6, "createdAt": "2026-11-06T03:00:00Z", "price": 10000, "title": "Верхняя полка", "brand": "", "photo": ""},
+]
 NET = {"down": False, "tableErr": "", "reject": {}, "catVersion": "2026-11-04T09:00:00Z", "lag": False, "catalogGets": 0}
 
 def handle(route, request):
@@ -33,6 +41,9 @@ def handle(route, request):
         q = request.url.split('?', 1)[1]
         if 'key=good' not in q:
             return route.fulfill(status=200, content_type='application/json', body=json.dumps({"ok": False, "error": "Неизвестный ключ устройства"}))
+        if 'action=orders' in q:
+            NET["ordersGets"] = NET.get("ordersGets", 0) + 1
+            return route.fulfill(status=200, content_type='application/json', body=json.dumps({"ok": True, "at": NET.get("ordersAt", "2026-11-06T10:00:00Z"), "orders": ORDERS}))
         if 'action=ping' in q:
             return route.fulfill(status=200, content_type='application/json', body=json.dumps({"ok": True, "user": "Ольга"}))
         # как настоящая таблица: принятые пики уже записаны в «Место хранения»
@@ -311,6 +322,32 @@ with sync_playwright() as p:
     page.evaluate("window.dispatchEvent(new Event('online'))"); page.wait_for_timeout(6500)
     check(not any(e.get('barcode') == '2000000500003' for e in posted), 'ни пик, ни исправление упаковки не ушли в таблицу')
     check('всё отправлено' in page.inner_text('#sync'), 'очередь пуста')
+
+    # «Заказы»: новые заказы WB по стеллажам и полкам
+    page.click('#modeOrders'); page.wait_for_timeout(800)
+    check(page.is_visible('#ordersView') and not page.is_visible('#cellbar'), 'вкладка «Заказы» открылась')
+    cells = page.eval_on_selector_all('#ordersList .ord .ord-cell', 'els => els.map(e => e.firstChild.textContent)')
+    check(cells == ['С4-П1', 'С4-П2', 'С5-П1', 'С17-П4', 'С21-П4', '?'], 'порядок: стеллажи по возрастанию, полки сверху вниз, без места — в конце: ' + str(cells))
+    racks = page.eval_on_selector_all('#ordersList .ord-rack', 'els => els.map(e => e.textContent)')
+    check(racks == ['Стеллаж С4', 'Стеллаж С5', 'Стеллаж С17', 'Стеллаж С21', 'Место неизвестно'], 'разбивка по стеллажам: ' + str(racks))
+    check('по 1С' in page.inner_text('#ord-3') and 'по артикулу' in page.inner_text('#ord-4'), 'видно, откуда взято место')
+    check('1 311 ₽' in page.inner_text('#ord-3').replace('\u00a0', ' ').replace('\u202f', ' '), 'цена в рублях: ' + page.inner_text('#ord-3').replace('\n', ' | '))
+    check('Новых заказов: 6' in page.inner_text('#ordersHead'), 'счётчик заказов')
+    page.screenshot(path='/tmp/razm_orders.png', full_page=True)
+    scan('9785480000566'); page.wait_for_timeout(400)
+    check('ЕСТЬ В ЗАКАЗЕ' in st() and 'С5-П1' in st() and 'picked' in page.get_attribute('#ord-5', 'class'), 'пик книги из заказа — отмечена «взята»')
+    page.wait_for_timeout(1600)
+    scan('9785480000566'); page.wait_for_timeout(300)
+    check('УЖЕ ВЗЯТА' in st(), 'повторный пик — «уже взята»')
+    scan('2000000311869'); page.wait_for_timeout(300)
+    check('НЕТ В НОВЫХ ЗАКАЗАХ' in st(), 'книга не из заказа — красный')
+    check('собрано 1' in page.inner_text('#ordersHead'), 'счётчик «собрано»')
+    n_post = len(posted)
+    page.reload(); page.wait_for_timeout(1200)
+    page.click('#modeOrders'); page.wait_for_timeout(800)
+    check('picked' in page.get_attribute('#ord-5', 'class'), 'отметка «взята» пережила обновление страницы')
+    check(len(posted) == n_post, 'вкладка «Заказы» ничего не отправляет в таблицу')
+    page.click('#modePlace'); page.wait_for_timeout(200)
 
     page.screenshot(path='/tmp/razm_e2e.png')
     check(not errors, 'нет ошибок JavaScript ' + (str(errors) if errors else ''))

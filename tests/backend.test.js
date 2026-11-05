@@ -258,4 +258,41 @@ sheets['Книги'] = sheets['Лист1']; delete sheets['Лист1'];
 const cat2 = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'catalog' } }).text);
 assert.ok(cat2.ok && cat2.books['2000000311869'], 'переименованный Лист1 найден по gid 0');
 
-console.log('Все проверки пройдены:', 'Core + события + безопасная отмена + перемещение + справочник');
+// ---------- заказы WB (поддельный WB) ----------
+assert.strictEqual(Core.barcodeFromArticle('С35-П5_2000000289069'), '2000000289069');
+assert.strictEqual(Core.barcodeFromArticle('старый-артикул'), '');
+let o = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'orders' } }).text);
+assert.ok(!o.ok && o.error.includes('WB_TOKEN'), 'без ключа WB — понятная ошибка: ' + JSON.stringify(o));
+props.WB_TOKEN = 'test-token';
+const wbCalls = [];
+const cacheStore = {};
+ctx.CacheService = { getScriptCache: () => ({ get: k => cacheStore[k] || null, put: (k, v) => { cacheStore[k] = v; } }) };
+const resp = (code, obj) => ({ getResponseCode: () => code, getContentText: () => JSON.stringify(obj) });
+ctx.UrlFetchApp = {
+  fetch: (url, opts) => {
+    wbCalls.push(url); assert.strictEqual(opts.headers.Authorization, 'test-token');
+    return resp(200, { orders: [
+      { id: 11, article: 'С35-П5_2000000289069', nmId: 501, createdAt: '2026-11-05T20:55:00Z', convertedPrice: 131100, skus: ['2000000289069'] },
+      { id: 12, article: 'С4-П2_2000000311869', nmId: 502, createdAt: '2026-11-05T21:10:00Z', price: 50000 } ] });
+  },
+  fetchAll: reqs => reqs.map(rq => {
+    wbCalls.push(rq.url);
+    const nm = Number(JSON.parse(rq.payload).settings.filter.textSearch);
+    return resp(200, { cards: [{ nmID: nm, title: 'Книга ' + nm, brand: 'Современник', photos: [{ c246x328: 'https://img/' + nm + '.webp' }] }] });
+  })
+};
+o = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'orders' } }).text);
+assert.ok(o.ok, o.error);
+assert.strictEqual(o.orders.length, 2);
+assert.strictEqual(o.orders[0].barcode, '2000000289069');
+assert.strictEqual(o.orders[0].photo, 'https://img/501.webp');
+assert.strictEqual(o.orders[0].brand, 'Современник');
+assert.strictEqual(o.orders[0].price, 131100);
+const n1 = wbCalls.length;
+o = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'orders' } }).text);
+assert.strictEqual(wbCalls.length - n1, 1, 'фото берутся из кэша, второй раз — только список заказов');
+ctx.UrlFetchApp.fetch = () => resp(401, {});
+o = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'orders' } }).text);
+assert.ok(!o.ok && o.error.includes('401'), o.error);
+
+console.log('Все проверки пройдены:', 'Core + события + безопасная отмена + перемещение + справочник + заказы WB');

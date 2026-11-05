@@ -323,6 +323,7 @@ function doGet(e) {
     var user = auth_(e.parameter.key);
     if (e.parameter.action === 'ping') return json_({ ok: true, user: user, table: ss_().getName() });
     if (e.parameter.action === 'catalog') return json_(catalog_());
+    if (e.parameter.action === 'orders') return json_(wbOrders_());
     return json_({ ok: false, error: 'неизвестное действие' });
   } catch (err) {
     return json_({ ok: false, error: String(err.message || err) });
@@ -475,6 +476,92 @@ function writeRow_(sheet, rowNum, C, ch) {
     if (!map[k]) continue;
     sheet.getRange(rowNum, map[k]).setValue(ch[k] === undefined || ch[k] === null ? '' : ch[k]);
   }
+}
+
+// ============================================================ ЗАКАЗЫ WB (только чтение)
+// Ключ WB (категории «Маркетплейс» + «Контент», «Только на чтение») хранится в свойствах скрипта:
+// Apps Script → Настройки проекта → Свойства скрипта → WB_TOKEN. В коде и на телефонах его нет.
+var WB = {
+  ORDERS_NEW: 'https://marketplace-api.wildberries.ru/api/v3/orders/new',
+  CARDS: 'https://content-api.wildberries.ru/content/v2/get/cards/list',
+  CACHE_SEC: 6 * 3600
+};
+
+/** Артикул «С35-П5_2000000289069» -> «2000000289069» (наш штрихкод в конце артикула). */
+Core.barcodeFromArticle = function (article) {
+  var m = /_(\d{12,13})\s*$/.exec(String(article || ''));
+  return m ? m[1] : '';
+};
+
+function wbToken_() {
+  var t = PropertiesService.getScriptProperties().getProperty('WB_TOKEN');
+  if (!t) throw new Error('нет ключа WB: Apps Script → Настройки проекта → Свойства скрипта → WB_TOKEN');
+  return String(t).trim();
+}
+
+function wbFetch_(url, opts) {
+  var r = UrlFetchApp.fetch(url, Object.assign({ muteHttpExceptions: true, headers: { Authorization: wbToken_() } }, opts || {}));
+  return wbParse_(r);
+}
+function wbParse_(r) {
+  var code = r.getResponseCode();
+  if (code === 401) throw new Error('WB не принял ключ (401): проверьте WB_TOKEN и категории «Маркетплейс» и «Контент»');
+  if (code === 429) throw new Error('WB просит подождать (429) — обновите через минуту');
+  if (code >= 400) throw new Error('WB ответил ' + code + ': ' + String(r.getContentText()).slice(0, 200));
+  return JSON.parse(r.getContentText() || '{}');
+}
+
+/** Фото, издательство и название из карточки WB — с кэшем на 6 часов. */
+function wbCards_(nmIds) {
+  var cache = CacheService.getScriptCache(), out = {}, need = [];
+  nmIds.forEach(function (nm) {
+    var c = cache.get('nm:' + nm);
+    if (c) out[nm] = JSON.parse(c); else need.push(nm);
+  });
+  for (var i = 0; i < need.length; i += 10) {           // по 10 параллельно, чтобы не упереться в лимит WB
+    var part = need.slice(i, i + 10);
+    var reqs = part.map(function (nm) {
+      return { url: WB.CARDS, method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+               headers: { Authorization: wbToken_() },
+               payload: JSON.stringify({ settings: { filter: { textSearch: String(nm), withPhoto: -1 }, cursor: { limit: 10 } } }) };
+    });
+    var resp = UrlFetchApp.fetchAll(reqs);
+    for (var k = 0; k < resp.length; k++) {
+      var nm = part[k], info = { photo: '', brand: '', title: '' };
+      try {
+        var cards = (wbParse_(resp[k]).cards || []).filter(function (c) { return Number(c.nmID) === Number(nm); });
+        if (cards[0]) {
+          var ph = (cards[0].photos || [])[0] || {};
+          info = { photo: ph.c246x328 || ph.square || ph.tm || ph.big || '', brand: cards[0].brand || '', title: cards[0].title || '' };
+        }
+      } catch (e) { info.err = String(e.message || e); }
+      out[nm] = info;
+      if (!info.err) cache.put('nm:' + nm, JSON.stringify(info), WB.CACHE_SEC);
+    }
+  }
+  return out;
+}
+
+/** Новые сборочные задания FBS + фото. Ячейку и сортировку считает телефон по своему справочнику. */
+function wbOrders_() {
+  wbToken_();                                          // сначала понятная ошибка, если ключа нет
+  var j = wbFetch_(WB.ORDERS_NEW);
+  var orders = j.orders || [];
+  var nms = {};
+  orders.forEach(function (o) { if (o.nmId) nms[o.nmId] = 1; });
+  var cards = {};
+  var cardsErr = '';
+  try { cards = wbCards_(Object.keys(nms)); } catch (e) { cardsErr = String(e.message || e); }
+  return {
+    ok: true, at: new Date().toISOString(), cardsErr: cardsErr,
+    orders: orders.map(function (o) {
+      var c = cards[o.nmId] || {};
+      return { id: o.id, article: o.article || '', barcode: Core.barcodeFromArticle(o.article), skus: o.skus || [],
+               nmId: o.nmId || '', createdAt: o.createdAt || '', price: o.convertedPrice || o.price || 0,
+               salePrice: o.salePrice || o.finalPrice || 0, cargoType: o.cargoType || '',
+               photo: c.photo || '', brand: c.brand || '', title: c.title || '' };
+    })
+  };
 }
 
 // для тестов вне Google

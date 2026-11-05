@@ -4,7 +4,8 @@
 
 const API = window.RAZM_API ||
   'https://script.google.com/macros/s/AKfycbxzKklN_XquWi7e9ZKml2iGv7lnRI_gpab86hkXPs7SxT-FT3N4hD2cqfMTwvAksUxyPw/exec';
-const APP_VERSION = '1.8';
+const APP_VERSION = '1.9';
+const ORDERS_EVERY_MS = 3 * 60 * 1000;      // вкладка «Заказы» открыта — обновлять раз в 3 минуты
 const CATALOG_EVERY_MS = 10 * 60 * 1000;     // пока приложение открыто — обновлять справочник раз в 10 минут
 const CATALOG_STALE_MS = 30 * 60 * 1000;     // старше — кнопка «Справочник» жёлтая
 const RECENT_MS = 30 * 60 * 1000;            // свои пики помним 30 минут и накладываем поверх свежего справочника
@@ -82,7 +83,8 @@ const DB = {
 // ------------------------------------------------------------ состояние
 const S = {
   key: '', user: '', device: '',
-  mode: 'place',               // 'place' | 'find'
+  mode: 'place',               // 'place' | 'find' | 'orders'
+  orders: [], ordersAt: '', ordersErr: '', ordersLoading: false, picked: {},   // заказы WB (только чтение)
   cell: '',                    // активная ячейка
   catalog: {}, packages: [], catalogAt: '',
   current: null,               // текущий пик, ещё не поставлен в очередь: {ev, book, needsPkg}
@@ -148,7 +150,7 @@ async function fetchCatalog() {
     S.catalog = j.books || {}; S.packages = j.packages || []; S.catalogAt = j.version || new Date().toISOString();
     await overlayQueue();
     await DB.set('catalog', { books: S.catalog, packages: S.packages, at: S.catalogAt, table: S.table });
-    netOk(); renderPackages(); renderTop();
+    netOk(); renderPackages(); renderTop(); renderOrders();
     return true;
   } catch (e) {
     netFail(e); renderTop();
@@ -266,6 +268,7 @@ async function handleScan(code) {
   }
   if (code.kind === 'desk') { await setMode('find'); return true; }
   if (S.mode === 'find') { code.kind === 'cell' ? showFindCell(code) : showFind(code); return true; }
+  if (S.mode === 'orders') { orderScan(code); return true; }
 
   if (code.kind === 'cell') {
     if (!await commitCurrent()) return false;
@@ -504,6 +507,128 @@ function showFindCell(code) {
   show('info', 'ЯЧЕЙКА ' + code.cell, `${list.length} книг`, '', list.slice(0, 6).map(([, b]) => b.t).join(' · '));
 }
 
+// ------------------------------------------------------------ «Заказы» WB: что собрать и в каком порядке
+const cellKey = cell => {                     // «С35-П5» -> [35, 5]; латинские C/P тоже понимаем
+  const m = /^\s*[СC](\d+)\s*-\s*[ПP](\d+)/i.exec(String(cell || ''));
+  return m ? [Number(m[1]), Number(m[2])] : null;
+};
+let arIdx = null, arIdxAt = '';
+function bookForOrder(o) {
+  let bc = o.barcode && S.catalog[o.barcode] ? o.barcode : (o.skus || []).find(s => S.catalog[s]);
+  if (!bc && o.article) {
+    if (!arIdx || arIdxAt !== S.catalogAt) {
+      arIdx = {}; arIdxAt = S.catalogAt;
+      for (const [k, b] of Object.entries(S.catalog)) if (b.ar) arIdx[String(b.ar).trim()] = k;
+    }
+    bc = arIdx[String(o.article).trim()];
+  }
+  return bc ? { bc, b: S.catalog[bc] } : { bc: o.barcode || '', b: null };
+}
+function orderPlace(o) {
+  const { bc, b } = bookForOrder(o);
+  if (b && b.c) return { cell: b.c, src: '', bc, b };
+  if (b && b.s && b.s['1c']) return { cell: b.s['1c'], src: 'по 1С', bc, b };
+  if (b && b.s && b.s.arch) return { cell: b.s.arch, src: 'по архиву', bc, b };
+  const fromArt = /^\s*[СC]\d+\s*-\s*[ПP]\d+/i.exec(o.article || '');
+  return { cell: fromArt ? fromArt[0].trim() : '', src: fromArt ? 'по артикулу' : '', bc, b };
+}
+function sortedOrders() {
+  return S.orders.map(o => Object.assign({ o }, orderPlace(o))).sort((x, y) => {
+    const a = cellKey(x.cell) || [1e9, 1e9], b = cellKey(y.cell) || [1e9, 1e9];
+    return a[0] - b[0] || a[1] - b[1] || String(x.o.createdAt).localeCompare(String(y.o.createdAt));
+  });
+}
+
+async function loadOrders(force) {
+  if (S.ordersLoading) return;
+  if (!force && S.ordersAt && Date.now() - Date.parse(S.ordersAt) < ORDERS_EVERY_MS) return;
+  S.ordersLoading = true; renderOrders();
+  try {
+    const j = await api('GET', { action: 'orders' });
+    S.orders = j.orders || []; S.ordersAt = j.at || new Date().toISOString(); S.ordersErr = j.cardsErr ? 'фото: ' + j.cardsErr : '';
+    const ids = new Set(S.orders.map(o => String(o.id)));
+    for (const k of Object.keys(S.picked)) if (!ids.has(k)) delete S.picked[k];   // ушедшие заказы забываем
+    await DB.set('orders', { orders: S.orders, at: S.ordersAt, picked: S.picked });
+    netOk();
+  } catch (e) {
+    S.ordersErr = e.net ? 'нет сети — показан список от ' + (S.ordersAt ? hhmm(S.ordersAt) : '—') : String(e.message || e);
+  } finally {
+    S.ordersLoading = false; renderOrders(); renderTop();
+  }
+}
+
+function ago(iso) {
+  const m = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60000));
+  if (!isFinite(m)) return '';
+  return m < 60 ? `${m} мин назад` : m < 1440 ? `${Math.floor(m / 60)} ч ${m % 60} мин назад` : `${Math.floor(m / 1440)} д назад`;
+}
+
+function renderOrders() {
+  const box = $('ordersList'); if (!box) return;
+  $('ordersView').classList.toggle('hidden', S.mode !== 'orders');
+  if (S.mode !== 'orders') return;
+  const list = sortedOrders();
+  const done = list.filter(x => S.picked[String(x.o.id)]).length;
+  $('ordersHead').textContent = S.ordersLoading && !S.ordersAt ? 'Загружаю заказы WB…' :
+    `Новых заказов: ${list.length}` + (done ? ` · собрано ${done}` : '') + (S.ordersAt ? ` · ${hhmm(S.ordersAt)}` : '');
+  $('ordersRefresh').textContent = S.ordersLoading ? 'Обновляю…' : 'Обновить ↻';
+  $('ordersErr').textContent = S.ordersErr; $('ordersErr').classList.toggle('hidden', !S.ordersErr);
+  box.innerHTML = '';
+  if (!list.length && S.ordersAt && !S.ordersLoading) {
+    const e = document.createElement('div'); e.className = 'ord-empty'; e.textContent = 'Новых заказов нет'; box.appendChild(e);
+  }
+  let rack = null;
+  list.forEach(x => {
+    const k = cellKey(x.cell), r = k ? k[0] : -1;
+    if (r !== rack) {
+      rack = r;
+      const h = document.createElement('div'); h.className = 'ord-rack';
+      h.textContent = k ? `Стеллаж С${r}` : 'Место неизвестно';
+      box.appendChild(h);
+    }
+    const o = x.o, id = String(o.id);
+    const card = document.createElement('div'); card.className = 'ord' + (S.picked[id] ? ' picked' : ''); card.id = 'ord-' + id;
+    const img = document.createElement(o.photo ? 'img' : 'div'); img.className = 'ord-img';
+    if (o.photo) { img.src = o.photo; img.alt = ''; img.loading = 'lazy'; img.referrerPolicy = 'no-referrer'; }
+    const mid = document.createElement('div'); mid.className = 'ord-mid';
+    const t = document.createElement('b'); t.textContent = o.title || (x.b && x.b.t) || 'Без названия';
+    const a = document.createElement('span'); a.textContent = 'Арт. ' + (o.article || '—');
+    const p = document.createElement('span');
+    const rub = o.salePrice || o.price ? Math.round((o.salePrice || o.price) / 100).toLocaleString('ru-RU') + ' ₽' : '';
+    p.textContent = [o.brand, rub, o.createdAt ? ago(o.createdAt) : ''].filter(Boolean).join(' · ');
+    mid.append(t, a, p);
+    const c = document.createElement('div'); c.className = 'ord-cell';
+    c.textContent = x.cell || '?';
+    if (x.src) { const s = document.createElement('small'); s.textContent = x.src; c.appendChild(s); }
+    if (S.picked[id]) { const s = document.createElement('small'); s.textContent = '✓ взята'; c.appendChild(s); }
+    card.append(img, mid, c); box.appendChild(card);
+  });
+}
+
+/** Пик в «Заказах»: подсказать, есть ли книга в новых заказах, и отметить «взята». Ничего не пишет ни в WB, ни в таблицу. */
+function orderScan(code) {
+  if (code.kind === 'cell') {
+    const here = sortedOrders().filter(x => x.cell === code.cell);
+    beep('ok');
+    return show('info', 'ПОЛКА ' + code.cell, here.length ? `${here.length} в заказах` : '', here.length ? here.map(x => x.o.title || (x.b && x.b.t) || x.o.article).join(' · ') : 'На этой полке новых заказов нет', '');
+  }
+  if (code.kind !== 'book') return;
+  const hit = sortedOrders().filter(x => x.bc === code.code || (x.o.skus || []).includes(code.code));
+  if (!hit.length) {
+    beep('bad');
+    const b = S.catalog[code.code];
+    return show('bad', 'НЕТ В НОВЫХ ЗАКАЗАХ', '', b ? b.t : code.code, 'Эту книгу сейчас не заказывали. Верните на место.', S.ordersAt ? 'Список заказов от ' + hhmm(S.ordersAt) : '');
+  }
+  const free = hit.find(x => !S.picked[String(x.o.id)]);
+  if (!free) { beep('warn'); return show('warn', 'УЖЕ ВЗЯТА', hit[0].cell, hit[0].o.title || (hit[0].b && hit[0].b.t) || '', 'Эту книгу из заказа уже пикали.', ''); }
+  S.picked[String(free.o.id)] = Date.now();
+  DB.set('orders', { orders: S.orders, at: S.ordersAt, picked: S.picked });
+  beep('ok');
+  show('ok', 'ЕСТЬ В ЗАКАЗЕ', free.cell, free.o.title || (free.b && free.b.t) || '', 'Арт. ' + free.o.article, hit.length > 1 ? `Таких заказов: ${hit.length}` : '');
+  renderOrders();
+  const el = $('ord-' + free.o.id); if (el) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
 // ------------------------------------------------------------ интерфейс
 function stateKind() {
   const c = $('status').className.match(/s-(\w+)/);
@@ -621,15 +746,17 @@ function render() {
   $('cellbar').classList.toggle('hidden', S.mode !== 'place');
   $('modePlace').classList.toggle('on', S.mode === 'place');
   $('modeFind').classList.toggle('on', S.mode === 'find');
+  $('modeOrders').classList.toggle('on', S.mode === 'orders');
   $('shelf').classList.toggle('hidden', S.mode !== 'place');
   $('undoBtn').classList.toggle('hidden', S.mode !== 'place');
-  renderTop(); renderPackages(); renderShelf(); renderProblems();
+  renderTop(); renderPackages(); renderShelf(); renderProblems(); renderOrders();
 }
 
 async function setMode(m) {
   if (m === S.mode) return;
-  if (m === 'find' && !await commitCurrent()) return;
+  if (m !== 'place' && !await commitCurrent()) return;
   S.mode = m; hideActions(); render();
+  if (m === 'orders') { show('info', 'ЗАКАЗЫ WB', '', 'Новые заказы по стеллажам и полкам', 'Пикните книгу — покажу, есть ли она в заказе. Ничего не меняется ни в WB, ни в таблице.'); loadOrders(true); return; }
   if (m === 'find') show('info', 'ГДЕ КНИГА?', '', 'Пикните книгу', 'Покажу её место. Ничего не записывается.');
   else show('info', 'РАЗМЕЩЕНИЕ', '', S.cell ? 'Ячейка ' + S.cell : 'Пикните этикетку ячейки', '');
 }
@@ -754,6 +881,8 @@ async function start() {
   S.recent = await DB.get('recent') || {};
   S.rejected = await DB.get('rejected') || {};
   S.problems = await DB.get('problems') || [];
+  const ord = await DB.get('orders');
+  if (ord) { S.orders = ord.orders || []; S.ordersAt = ord.at || ''; S.picked = ord.picked || {}; }
   const cat = await DB.get('catalog');
   if (cat) { S.catalog = cat.books || {}; S.packages = cat.packages || []; S.catalogAt = cat.at || ''; S.table = cat.table || ''; await overlayQueue(); }
   const sess = await DB.get('session');
@@ -782,6 +911,8 @@ function enterMain() {
   setInterval(autoClose, 15 * 1000);
   autoClose();
   setInterval(() => loadCatalog(false), 60 * 1000);
+  setInterval(() => { if (S.mode === 'orders' && !document.hidden) loadOrders(false); }, 30 * 1000);
+  setInterval(() => { if (S.mode === 'orders') renderOrders(); }, 60 * 1000);   // «N мин назад»
 }
 
 function bind() {
@@ -806,12 +937,14 @@ function bind() {
   });
   scan.addEventListener('blur', () => setTimeout(focusScan, 150));
   document.addEventListener('click', () => setTimeout(focusScan, 50));
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) { focusScan(); autoClose().then(sync); loadCatalog(false, 60 * 1000); } });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { focusScan(); autoClose().then(sync); loadCatalog(false, 60 * 1000); if (S.mode === 'orders') loadOrders(false); } });
   window.addEventListener('online', () => { S.online = true; sync(); loadCatalog(false); });
   window.addEventListener('offline', () => { S.online = false; renderTop(); });
 
   $('modePlace').onclick = () => setMode('place');
   $('modeFind').onclick = () => setMode('find');
+  $('modeOrders').onclick = () => setMode('orders');
+  $('ordersRefresh').onclick = () => loadOrders(true);
   $('undoBtn').onclick = undo;
   $('doneBtn').onclick = () => { S.lastActivity = Date.now(); shelfDone(); };
   $('catBtn').onclick = refreshCatalog;
