@@ -48,7 +48,11 @@ var CFG = {
 
 var JOURNAL_HEADER = ['id события', 'получено', 'время скана', 'кто', 'устройство', 'действие',
   'штрихкод', 'ячейка', 'упаковка', 'Д', 'Ш', 'В', 'результат', 'строка',
-  'было: ячейка', 'было: артикул', 'было: упаковка', 'было: Д', 'было: Ш', 'было: В', 'было: размещено'];
+  'было: ячейка', 'было: артикул', 'было: упаковка', 'было: Д', 'было: Ш', 'было: В', 'было: размещено',
+  'к событию',      // исправление упаковки -> id исходного пика; отмена -> id отменённого пика
+  'было: кем'];
+var J = { id: 0, ts: 2, type: 5, barcode: 6, cell: 7, result: 12, row: 13, prevCell: 14, prevArticle: 15, prevPkg: 16,
+          prevL: 17, prevW: 18, prevH: 19, prevAt: 20, ref: 21, prevBy: 22 };
 
 // ============================================================ ЧИСТАЯ ЛОГИКА
 // (без обращений к таблице — проверяется тестами вне Google)
@@ -161,7 +165,23 @@ Core.applyPlace = function (row, ev) {
 /** Отмена: вернуть значения "было" из записи журнала исходного события. */
 Core.undoChanges = function (prev) {
   return { cell: prev.cell, article: prev.article, pkg: prev.pkg, L: prev.L, W: prev.W, H: prev.H,
-           placedAt: prev.placedAt, placedBy: '' };
+           placedAt: prev.placedAt, placedBy: prev.placedBy || '' };
+};
+
+/**
+ * Можно ли отменить пик origId: в строке должно быть ровно то, что записал этот пик (или его исправление упаковки).
+ * last — последнее применённое событие по этому штрихкоду {id, ref, cell, ts, undo}; row — строка сейчас.
+ * Возвращает '' если можно, иначе причину.
+ */
+Core.undoBlocker = function (origId, last, row) {
+  if (!last) return 'по этой книге нет применённых пиков';
+  if (last.undo) return 'пик уже отменён';
+  if (last.id !== origId && last.ref !== origId) return 'после этого пика книгу уже меняли (' + (last.cell || '?') + ', ' + Core.msk(last.ts) + ')';
+  var cell = String(row.cell || '').trim();
+  if (cell !== String(last.cell || '').trim() || Core.msk(row.placedAt) !== Core.msk(last.ts)) {
+    return 'строку изменили вручную после пика (сейчас: ' + (cell || 'без ячейки') + ', ' + (Core.msk(row.placedAt) || 'без времени') + ')';
+  }
+  return '';
 };
 
 /**
@@ -355,10 +375,24 @@ function processEvents_(user, device, events) {
   var out = [];
 
   // уже обработанные события (повторная отправка того же id пропускается)
-  var done = {};
+  if (String(journal.getRange(1, J.ref + 1).getValue()) !== JOURNAL_HEADER[J.ref]) {      // журнал старого вида — дописать заголовки
+    journal.getRange(1, J.ref + 1, 1, 2).setValues([[JOURNAL_HEADER[J.ref], JOURNAL_HEADER[J.prevBy]]]).setFontWeight('bold');
+  }
+  var done = {}, lastBy = {};
+  function track(vals) {           // последнее применённое событие по штрихкоду — для проверки отмены
+    var bc = Core.normBarcode(vals[J.barcode]), type = String(vals[J.type]), res = String(vals[J.result]);
+    if (!bc) return;
+    if ((type === 'place' || type === 'move') && res === 'ok') lastBy[bc] = { id: String(vals[J.id]), ref: String(vals[J.ref] || ''), cell: vals[J.cell], ts: vals[J.ts] };
+    if (type === 'undo' && res === 'отменено') lastBy[bc] = { undo: true, ref: String(vals[J.ref] || '') };
+  }
   if (journal.getLastRow() > 1) {
     var jv = journal.getRange(2, 1, journal.getLastRow() - 1, JOURNAL_HEADER.length).getValues();
-    for (var i = 0; i < jv.length; i++) done[String(jv[i][0])] = { row: i + 2, vals: jv[i] };
+    for (var i = 0; i < jv.length; i++) { done[String(jv[i][0])] = { row: i + 2, vals: jv[i] }; track(jv[i]); }
+  }
+  function readRow(n) {
+    var rv = books.getRange(n, 1, 1, books.getLastColumn()).getValues()[0];
+    return { cell: rv[C.cell - 1], article: rv[C.article - 1], pkg: rv[C.pkg - 1], L: rv[C.L - 1],
+             W: rv[C.W - 1], H: rv[C.H - 1], placedAt: rv[C.placedAt - 1], placedBy: rv[C.placedBy - 1] };
   }
   // индекс штрихкод -> строка
   var last = books.getLastRow();
@@ -373,17 +407,30 @@ function processEvents_(user, device, events) {
     var id = String(ev.id || '');
     if (!id) { out.push({ id: id, result: 'нет id' }); return; }
     if (done[id]) { out.push({ id: id, result: 'уже получено' }); return; }
-    var res, rowNum = '', prev = {}, pkg = ev.pkg || null;
+    var res, rowNum = '', prev = {}, pkg = ev.pkg || null, ref = '';
     try {
       if (ev.type === 'undo') {
-        var orig = done[String(ev.undoOf || '')];
+        ref = String(ev.undoOf || '');
+        var orig = done[ref];
         if (!orig) throw new Error('не найдено событие для отмены');
-        if (orig.vals[12] !== 'ok') throw new Error('отменять нечего: исходный пик не был применён (' + orig.vals[12] + ')');
-        rowNum = Number(orig.vals[13]);
-        var p = orig.vals;
-        var ch = Core.undoChanges({ cell: p[14], article: p[15], pkg: p[16], L: p[17], W: p[18], H: p[19], placedAt: p[20] });
-        writeRow_(books, rowNum, C, ch);
-        res = 'отменено';
+        if (orig.vals[J.result] !== 'ok') throw new Error('отменять нечего: исходный пик не был применён (' + orig.vals[J.result] + ')');
+        var ubc = Core.normBarcode(orig.vals[J.barcode]);
+        ev.barcode = ubc;
+        if (lastBy[ubc] && lastBy[ubc].undo && lastBy[ubc].ref === ref) { res = 'уже отменено'; }
+        else {
+          // строку ищем заново по штрихкоду: строки могли сдвинуться (сортировка, перенос в архив)
+          rowNum = index[ubc];
+          if (!rowNum) throw new Error('книги больше нет в «' + CFG.BOOKS_SHEET + '» (перенесли?) — отмена не применена');
+          if (rowNum === -1) throw new Error('штрихкод встречается в таблице дважды — отмена не применена, разберите вручную');
+          var cur = readRow(rowNum);
+          prev = cur;
+          var why = Core.undoBlocker(ref, lastBy[ubc], cur);
+          if (why) throw new Error(why + ' — отмена не применена, разберите вручную');
+          var p = orig.vals;
+          writeRow_(books, rowNum, C, Core.undoChanges({ cell: p[J.prevCell], article: p[J.prevArticle], pkg: p[J.prevPkg],
+            L: p[J.prevL], W: p[J.prevW], H: p[J.prevH], placedAt: p[J.prevAt], placedBy: p[J.prevBy] }));
+          res = 'отменено';
+        }
       } else {
         var code = Core.classify(ev.barcode);
         if (code.kind !== 'book') throw new Error('некорректный штрихкод «' + code.code + '»');
@@ -391,10 +438,9 @@ function processEvents_(user, device, events) {
         rowNum = index[code.code];
         if (!rowNum) throw new Error('штрихкода нет в «' + CFG.BOOKS_SHEET + '»');
         if (rowNum === -1) throw new Error('штрихкод встречается в таблице дважды — разберите вручную');
-        var rv = books.getRange(rowNum, 1, 1, books.getLastColumn()).getValues()[0];
-        var row = { cell: rv[C.cell - 1], article: rv[C.article - 1], pkg: rv[C.pkg - 1], L: rv[C.L - 1],
-                    W: rv[C.W - 1], H: rv[C.H - 1], placedAt: rv[C.placedAt - 1], placedBy: rv[C.placedBy - 1] };
+        var row = readRow(rowNum);
         prev = row;
+        ref = String(ev.fixOf || '');
         if (pkg && pkg.name && !pkg.L) {  // стандартная упаковка по имени
           for (var q = 0; q < packages.length; q++) if (packages[q].name === pkg.name) pkg = packages[q];
         }
@@ -409,12 +455,13 @@ function processEvents_(user, device, events) {
     var jrow = [id, Core.msk(now), Core.msk(ev.ts), user, device, String(ev.type || ''), String(ev.barcode || ''),
       String(ev.cell || ''), pkg ? (pkg.name || '') : '', pkg ? (pkg.L || '') : '', pkg ? (pkg.W || '') : '',
       pkg ? (pkg.H || '') : '', res, rowNum, prev.cell || '', prev.article || '', prev.pkg || '',
-      prev.L || '', prev.W || '', prev.H || '', prev.placedAt ? Core.msk(prev.placedAt) : ''];
+      prev.L || '', prev.W || '', prev.H || '', prev.placedAt ? Core.msk(prev.placedAt) : '', ref, prev.placedBy || ''];
     journal.appendRow(jrow);
     journal.getRange(journal.getLastRow(), 2, 1, 2).setNumberFormat('@');   // время — текстом, как написано
     journal.getRange(journal.getLastRow(), 7).setNumberFormat('@');
     journal.getRange(journal.getLastRow(), 21).setNumberFormat('@');
     done[id] = { row: journal.getLastRow(), vals: jrow };
+    track(jrow);
     if (res !== 'ok' && res !== 'отменено') errors.appendRow([Core.msk(now), user, id, String(ev.barcode || ''), String(ev.cell || ''), res]);
     out.push({ id: id, result: res });
   });

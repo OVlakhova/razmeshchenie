@@ -24,7 +24,7 @@ BOOKS = {
   "9785991035781": {"t": "Старая из 1С", "a": "Б", "s": {"1c": "С17-П4", "arch": "С17-П4"}, "f": 1, "ar": "С17-П4_9785991035781"},
 }
 posted = []
-NET = {"down": False, "tableErr": "", "catVersion": "2026-11-04T09:00:00Z", "lag": False, "catalogGets": 0}
+NET = {"down": False, "tableErr": "", "reject": {}, "catVersion": "2026-11-04T09:00:00Z", "lag": False, "catalogGets": 0}
 
 def handle(route, request):
     if NET["down"]:
@@ -47,7 +47,8 @@ def handle(route, request):
     if NET["tableErr"]:
         return route.fulfill(status=200, content_type='application/json', body=json.dumps({"ok": False, "error": NET["tableErr"]}))
     posted.extend(body['events'])
-    res = [{"id": e["id"], "result": "ok" if e.get("type") != "undo" else "отменено"} for e in body['events']]
+    res = [{"id": e["id"], "result": NET["reject"].get(e.get("barcode"), "ok") if e.get("type") != "undo" else "отменено"} for e in body['events']]
+    posted[:] = [e for e in posted if e.get("barcode") not in NET["reject"]]
     return route.fulfill(status=200, content_type='application/json', body=json.dumps({"ok": True, "results": res}))
 
 fails = []
@@ -273,6 +274,43 @@ with sync_playwright() as p:
     scan('2000000311869'); page.wait_for_timeout(300)
     check('УЖЕ РАЗМЕЩЕНА' in st() and 'С19-П2' in st(), 'свой свежий пик не потерялся после обновления справочника: ' + st().replace('\n', ' | '))
     page.click('#moveNo'); NET["lag"] = False
+
+    # таблица отказала по одной книге — видно в списке и в итоге «Полка готова»
+    BOOKS["2000000500001"] = {"t": "Пятая книга", "a": "", "s": {}, "n": 1, "q": 1, "c": "", "d": [25, 17, 2]}
+    BOOKS["2000000500002"] = {"t": "Шестая книга", "a": "", "s": {}, "n": 1, "q": 1, "c": ""}
+    BOOKS["2000000500003"] = {"t": "Седьмая книга", "a": "", "s": {}, "n": 1, "q": 1, "c": "", "d": [25, 17, 2]}
+    page.click('#catBtn'); page.wait_for_timeout(800)
+    NET["reject"]["2000000500002"] = "ошибка: уже размещена в С5-П1"
+    scan('991021002'); page.wait_for_timeout(1600)
+    scan('2000000500001'); page.wait_for_timeout(1600)
+    scan('2000000500002'); page.wait_for_timeout(300)
+    page.locator('#pkgGrid button', has_text='Разв·5').click(); page.wait_for_timeout(150)
+    page.click('#doneBtn'); page.wait_for_timeout(2500)
+    t = st().replace('\n', ' | ')
+    check('ЕСТЬ ОТКАЗЫ' in t and '1 из 2 записаны' in t and 'Шестая книга' in t and 'уже размещена в С5-П1' in t, '«Полка готова» честно показывает отказ: ' + t)
+    page.screenshot(path='/tmp/razm_reject.png')
+    check(page.is_visible('#problems') and 'Шестая книга' in page.inner_text('#problems'), 'отказ виден в рамке')
+    page.reload(); page.wait_for_timeout(1200)
+    check(page.is_visible('#problems') and 'Шестая книга' in page.inner_text('#problems'), 'отказ не пропал после обновления страницы')
+    page.click('#problems'); page.wait_for_timeout(200)
+    check(not page.is_visible('#problems'), 'рамку можно скрыть касанием')
+    del NET["reject"]["2000000500002"]
+
+    # без сети: пик -> исправили упаковку -> отменили: в таблицу не уходит ничего
+    ctx.set_offline(True); NET["down"] = True
+    page.evaluate("window.dispatchEvent(new Event('offline'))")
+    scan('991021003'); page.wait_for_timeout(1600)
+    scan('2000000500003'); page.wait_for_timeout(1600)
+    scan('991021003'); page.wait_for_timeout(300)
+    page.locator('#shelf .row', has_text='Седьмая книга').locator('button').click(); page.wait_for_timeout(200)
+    page.locator('#pkgGrid button', has_text='Разв·5').click(); page.wait_for_timeout(200)
+    check('УПАКОВКА ИЗМЕНЕНА' in st(), 'исправление упаковки без сети')
+    page.click('#undoBtn'); page.wait_for_timeout(300)
+    check('ОТМЕНЕНО' in st() and 'Седьмая книга' in st(), 'отмена книги с исправленной упаковкой')
+    ctx.set_offline(False); NET["down"] = False
+    page.evaluate("window.dispatchEvent(new Event('online'))"); page.wait_for_timeout(6500)
+    check(not any(e.get('barcode') == '2000000500003' for e in posted), 'ни пик, ни исправление упаковки не ушли в таблицу')
+    check('всё отправлено' in page.inner_text('#sync'), 'очередь пуста')
 
     page.screenshot(path='/tmp/razm_e2e.png')
     check(not errors, 'нет ошибок JavaScript ' + (str(errors) if errors else ''))

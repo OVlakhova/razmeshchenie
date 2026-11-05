@@ -4,7 +4,7 @@
 
 const API = window.RAZM_API ||
   'https://script.google.com/macros/s/AKfycbxzKklN_XquWi7e9ZKml2iGv7lnRI_gpab86hkXPs7SxT-FT3N4hD2cqfMTwvAksUxyPw/exec';
-const APP_VERSION = '1.7';
+const APP_VERSION = '1.8';
 const CATALOG_EVERY_MS = 10 * 60 * 1000;     // пока приложение открыто — обновлять справочник раз в 10 минут
 const CATALOG_STALE_MS = 30 * 60 * 1000;     // старше — кнопка «Справочник» жёлтая
 const RECENT_MS = 30 * 60 * 1000;            // свои пики помним 30 минут и накладываем поверх свежего справочника
@@ -93,6 +93,7 @@ const S = {
   tableErr: '', table: '', busy: false,
   lastActivity: 0,             // время последнего действия — для сброса ячейки после перерыва
   pkgByCode: {},
+  rejected: {},                // id пика -> причина, если таблица его не приняла
   recent: {},                  // штрихкод -> {cell, at}: свои недавние пики (справочник с сервера мог их ещё не увидеть)               // упаковка, выбранная на этой полке для штрихкода (для 2-го, 3-го экземпляра)
   lastScan: { code: '', at: 0 },
   pendingMove: null, pendingUnknown: null,
@@ -164,15 +165,30 @@ async function sync() {
   try {
     const batch = q.slice(0, 50).map(({ seq, ...ev }) => ev);
     const j = await api('POST', {}, { events: batch });
+    let refused = false;
     for (const r of j.results || []) {
-      if (!['ok', 'уже получено', 'отменено'].includes(r.result)) {
+      if (!['ok', 'уже получено', 'отменено', 'уже отменено'].includes(r.result)) {
         const ev = batch.find(e => e.id === r.id) || {};
-        const title = (S.catalog[ev.barcode] || {}).t || ev.barcode || '';
-        if (ev.barcode && S.recent[ev.barcode]) { delete S.recent[ev.barcode]; DB.set('recent', S.recent); }
-        S.problems.unshift(`${title}: ${r.result}`);
-        S.problems = S.problems.slice(0, 5);
+        const title = ev.title || (S.catalog[ev.barcode] || {}).t || ev.barcode || '';
+        if (ev.barcode && S.recent[ev.barcode]) delete S.recent[ev.barcode];
+        const what = ev.type === 'undo' ? 'отмена: ' : ev.fixOf ? 'упаковка: ' : '';
+        S.problems.unshift(`${title} — ${what}${r.result.replace(/^ошибка: /, '')}`);
+        S.problems = S.problems.slice(0, 10);
+        if (ev.type !== 'undo') {
+          const pick = ev.fixOf || ev.id;
+          S.rejected[pick] = { why: (ev.fixOf ? 'упаковка не принята: ' : '') + r.result.replace(/^ошибка: /, ''), pickOk: !!ev.fixOf };
+          const it = S.shelf.find(x => x.id === pick);
+          if (it && !ev.fixOf && S.counts[it.barcode]) S.counts[it.barcode]--;   // книга не на этой полке — можно пикнуть снова
+        }
+        refused = true;
       }
       await DB.qDel(r.id);
+    }
+    if (refused) {
+      const ids = Object.keys(S.rejected); if (ids.length > 300) ids.slice(0, ids.length - 300).forEach(k => delete S.rejected[k]);
+      await DB.set('recent', S.recent); await DB.set('rejected', S.rejected); await DB.set('problems', S.problems);
+      await saveSession(); renderShelf();
+      setTimeout(() => loadCatalog(true), 0);                    // справочник — по правде таблицы
     }
     netOk();
   } catch (e) {
@@ -365,7 +381,8 @@ async function choosePkg(p) {
     it.pkg = Object.assign({}, p);
     S.pkgByCode[it.barcode] = Object.assign({}, p);
     await saveSession();
-    await enqueue({ id: uid(), ts: new Date().toISOString(), type: 'place', cell: S.cell, barcode: it.barcode, pkg: it.pkg });
+    delete S.rejected[it.id];
+    await enqueue({ id: uid(), ts: new Date().toISOString(), type: 'place', cell: S.cell, barcode: it.barcode, pkg: it.pkg, fixOf: it.id, title: it.title });
     S.lastPkg = Object.assign({}, p);
     renderShelf();
     show('ok', 'УПАКОВКА ИЗМЕНЕНА', '', it.title, pkgLabel(p));
@@ -401,8 +418,10 @@ async function undo() {
   if (S.catalog[last.barcode]) S.catalog[last.barcode].c = last.prevC;
   await remember(last.barcode, last.prevC);
   const q = await DB.qAll();
-  if (q.find(e => e.id === last.id)) await DB.qDel(last.id);       // ещё не отправлен — просто удалить
-  else await enqueue({ id: uid(), ts: new Date().toISOString(), type: 'undo', undoOf: last.id });
+  for (const e of q) if (e.fixOf === last.id) await DB.qDel(e.id);  // неотправленные исправления упаковки этого пика — тоже убрать
+  if (q.find(e => e.id === last.id)) await DB.qDel(last.id);       // сам пик ещё не отправлен — просто удалить
+  else if (!(S.rejected[last.id] && !S.rejected[last.id].pickOk)) await enqueue({ id: uid(), ts: new Date().toISOString(), type: 'undo', undoOf: last.id, title: last.title });
+  delete S.rejected[last.id]; await DB.set('rejected', S.rejected);
   S.queued = (await DB.qAll()).length;
   await saveSession();
   renderShelf(); renderTop();
@@ -415,7 +434,7 @@ async function shelfDone() {
   hideActions();
   if (!S.cell) return show('gray', 'ЯЧЕЙКА НЕ ВЫБРАНА', '', 'Пикните этикетку ячейки', '');
   if (!await commitCurrent()) return;
-  const cell = S.cell, n = S.shelf.length;
+  const cell = S.cell, n = S.shelf.length, items = S.shelf.slice();
   releaseCell();
   await saveSession();
   render();
@@ -424,8 +443,18 @@ async function shelfDone() {
   for (let i = 0; S.syncing && i < 50; i++) await new Promise(r => setTimeout(r, 200));   // дождаться идущей отправки
   await sync();
   const left = S.queued;
-  show(left ? 'warn' : 'ok', 'ПОЛКА ГОТОВА', cell, `${n} ${plural(n, 'книга', 'книги', 'книг')}`,
-       left ? `Ждут отправки: ${left}. Отправятся сами, когда будет сеть — приложение не удаляйте.` : 'Всё отправлено в таблицу. Можно уходить.');
+  const rej = items.filter(it => S.rejected[it.id]);
+  if (rej.length) {
+    beep('bad');
+    const notPlaced = rej.filter(it => !S.rejected[it.id].pickOk).length;
+    show('bad', 'ПОЛКА ГОТОВА — ЕСТЬ ОТКАЗЫ', cell,
+         notPlaced ? `${n - notPlaced} из ${n} записаны, не принято: ${notPlaced}` : `${n} ${plural(n, 'книга', 'книги', 'книг')}, но есть отказы`,
+         rej.slice(0, 3).map(it => `${it.title} — ${S.rejected[it.id].why}`).join(' · ') + (rej.length > 3 ? ' · …' : ''),
+         'Эти книги отложите и разберите: подробности на листе «Ошибки».' + (left ? ` Ещё ждут отправки: ${left}.` : ''));
+  } else {
+    show(left ? 'warn' : 'ok', 'ПОЛКА ГОТОВА', cell, `${n} ${plural(n, 'книга', 'книги', 'книг')}`,
+         left ? `Ждут отправки: ${left}. Отправятся сами, когда будет сеть — приложение не удаляйте.` : 'Всё отправлено в таблицу. Можно уходить.');
+  }
   loadCatalog(true);                                  // пауза между полками — обновить справочник
 }
 
@@ -571,6 +600,8 @@ function renderShelf() {
     const d = document.createElement('div');
     const b = document.createElement('b'); b.textContent = it.title;
     const s = document.createElement('span'); s.textContent = pkgLabel(it.pkg) || 'габариты из таблицы';
+    const rj = S.rejected[it.id];
+    if (rj) { row.className = 'row bad'; s.textContent = (rj.pickOk ? '' : 'НЕ ПРИНЯТА: ') + rj.why; }
     d.append(b, s);
     const btn = document.createElement('button'); btn.type = 'button'; btn.textContent = 'Упаковка';
     btn.onclick = async () => { if (!await commitCurrent()) return; S.editShelf = it; renderPackages(); show('info', 'ИСПРАВИТЬ УПАКОВКУ', '', it.title, 'Выберите упаковку'); };
@@ -581,7 +612,7 @@ function renderShelf() {
 function renderProblems() {
   const p = $('problems');
   p.classList.toggle('hidden', !S.problems.length);
-  p.textContent = S.problems.length ? 'Не принято таблицей (см. лист «Ошибки»): ' + S.problems.join(' · ') : '';
+  p.textContent = S.problems.length ? 'Не принято таблицей (подробно — лист «Ошибки»): ' + S.problems.join(' · ') + '  ✕ скрыть' : '';
 }
 
 function render() {
@@ -721,6 +752,8 @@ async function start() {
   const auth = await DB.get('auth');
   if (auth) { S.key = auth.key; S.user = auth.user; }
   S.recent = await DB.get('recent') || {};
+  S.rejected = await DB.get('rejected') || {};
+  S.problems = await DB.get('problems') || [];
   const cat = await DB.get('catalog');
   if (cat) { S.catalog = cat.books || {}; S.packages = cat.packages || []; S.catalogAt = cat.at || ''; S.table = cat.table || ''; await overlayQueue(); }
   const sess = await DB.get('session');
@@ -782,6 +815,7 @@ function bind() {
   $('undoBtn').onclick = undo;
   $('doneBtn').onclick = () => { S.lastActivity = Date.now(); shelfDone(); };
   $('catBtn').onclick = refreshCatalog;
+  $('problems').onclick = async () => { S.problems = []; await DB.set('problems', []); renderProblems(); };
   $('unkRefresh').onclick = refreshCatalog;
   ['mL', 'mW', 'mH'].forEach(id => $(id).addEventListener('input', resetManualCheck));
   $('pkgManual').onclick = openManual;

@@ -34,6 +34,7 @@ class Sheet {
         return this;
       },
       setValue(v) { return this.setValues([[v]]); },
+      getValue() { return this.getValues()[0][0]; },
       setNumberFormat() { return this; }, setFontWeight() { return this; }
     };
   }
@@ -173,6 +174,71 @@ const journal = sheets['Журнал размещения'];
 assert.strictEqual(journal.rows.length - 1, 9, 'все 9 событий в журнале, повтор e1 не задвоен');
 assert.ok(sheets['Ошибки'].rows.length - 1 >= 4);
 
+// ---------- безопасная отмена ----------
+const vladaKey = Object.keys(keys).find(k => keys[k] === 'Влада');
+function postAs(key, events) {
+  return JSON.parse(vm.runInContext('doPost', ctx)({ postData: { contents: JSON.stringify({ key, device: 't', events }) } }).text);
+}
+const W = books.rows[0].length;
+function addBook(no, title, barcode, L = '', Wd = '', Hd = '') {
+  const r = Array(W).fill(''); r[0] = no; r[hm['Название книги']] = title; r[hm['НАШ ШТРИХКОД']] = barcode;
+  r[hm['Количество']] = 1; r[hm['Длина']] = L; r[hm['Ширина']] = Wd; r[hm['Высота']] = Hd;
+  books.rows.push(r); return books.rows.length - 1;     // индекс строки в массиве
+}
+const byCode = bc => books.rows.find(x => String(x[hm['НАШ ШТРИХКОД']]) === bc);
+const res1 = (rr) => rr.results[0].result;
+
+// 1) строки сдвинулись между пиком и отменой — отмена находит книгу по штрихкоду
+addBook(101, 'Сдвиг', '2000000400001', 25, 17, 2);
+assert.strictEqual(res1(post([{ id: 's1', ts: '2026-11-05T10:00:00Z', type: 'place', cell: 'С30-П1', barcode: '2000000400001' }])), 'ok');
+const filler = Array(W).fill(''); filler[hm['Название книги']] = 'Вставленная строка'; filler[hm['НАШ ШТРИХКОД']] = 2000000400099;
+books.rows.splice(1, 0, filler);                       // кто-то вставил строку сверху — все номера сдвинулись
+assert.strictEqual(res1(post([{ id: 's1u', ts: '2026-11-05T10:00:30Z', type: 'undo', undoOf: 's1' }])), 'отменено');
+assert.strictEqual(byCode('2000000400001')[hm['Место хранения']], '', 'отмена попала в нужную книгу');
+assert.strictEqual(byCode('2000000400001')[hm['Артикул']], '');
+assert.strictEqual(byCode('2000000400099')[hm['Место хранения']], '', 'соседняя строка не тронута');
+assert.strictEqual(String(books.rows[2][hm['Название книги']]), 'Книга А', 'Книга А на месте');
+assert.strictEqual(books.rows[2][hm['Место хранения']], 'С21-П4', 'отмена не записала ничего в строку, где раньше была книга');
+// повторная отмена того же пика
+assert.strictEqual(res1(post([{ id: 's1u2', ts: '2026-11-05T10:00:40Z', type: 'undo', undoOf: 's1' }])), 'уже отменено');
+
+// 2) после пика книгу переместили — отмена не затирает перемещение
+addBook(102, 'Переместили', '2000000400002', 25, 17, 2);
+assert.strictEqual(res1(post([{ id: 'p2', ts: '2026-11-05T10:01:00Z', type: 'place', cell: 'С30-П1', barcode: '2000000400002' }])), 'ok');
+assert.strictEqual(res1(postAs(vladaKey, [{ id: 'p2m', ts: '2026-11-05T10:02:00Z', type: 'move', cell: 'С31-П1', barcode: '2000000400002' }])), 'ok');
+let u = res1(post([{ id: 'p2u', ts: '2026-11-05T10:02:30Z', type: 'undo', undoOf: 'p2' }]));
+assert.ok(u.includes('уже меняли') && u.includes('отмена не применена'), u);
+assert.strictEqual(byCode('2000000400002')[hm['Место хранения']], 'С31-П1', 'перемещение не затёрто');
+
+// 3) строку поправили руками — отмена не трогает
+addBook(103, 'Руками', '2000000400003', 25, 17, 2);
+assert.strictEqual(res1(post([{ id: 'p3', ts: '2026-11-05T10:03:00Z', type: 'place', cell: 'С30-П1', barcode: '2000000400003' }])), 'ok');
+byCode('2000000400003')[hm['Место хранения']] = 'С32-П2';
+u = res1(post([{ id: 'p3u', ts: '2026-11-05T10:03:30Z', type: 'undo', undoOf: 'p3' }]));
+assert.ok(u.includes('вручную'), u);
+assert.strictEqual(byCode('2000000400003')[hm['Место хранения']], 'С32-П2');
+
+// 4) пик + исправление упаковки -> отмена пика убирает и исправление
+addBook(104, 'Исправили упаковку', '2000000400004');
+assert.strictEqual(res1(post([{ id: 'p4', ts: '2026-11-05T10:04:00Z', type: 'place', cell: 'С30-П1', barcode: '2000000400004', pkg: { name: 'Развертка - 5 см.' } }])), 'ok');
+assert.strictEqual(res1(post([{ id: 'p4f', ts: '2026-11-05T10:04:20Z', type: 'place', cell: 'С30-П1', barcode: '2000000400004', pkg: { name: '201 - 2 см.' }, fixOf: 'p4' }])), 'ok');
+assert.strictEqual(byCode('2000000400004')[hm['Длина']], 25);
+assert.strictEqual(res1(post([{ id: 'p4u', ts: '2026-11-05T10:04:40Z', type: 'undo', undoOf: 'p4' }])), 'отменено');
+const b4 = byCode('2000000400004');
+assert.ok(b4[hm['Место хранения']] === '' && b4[hm['Длина']] === '' && b4[hm['Упаковка']] === '' && b4[hm['Артикул']] === '', 'строка как до пика');
+
+// 5) «Размещено кем» возвращается после отмены
+addBook(105, 'Кем', '2000000400005', 25, 17, 2);
+assert.strictEqual(res1(post([{ id: 'p5', ts: '2026-11-05T10:05:00Z', type: 'place', cell: 'С30-П1', barcode: '2000000400005' }])), 'ok');
+assert.strictEqual(res1(postAs(vladaKey, [{ id: 'p6', ts: '2026-11-05T10:06:00Z', type: 'place', cell: 'С30-П1', barcode: '2000000400005' }])), 'ok');
+assert.strictEqual(byCode('2000000400005')[hm['Размещено кем']], 'Влада');
+assert.strictEqual(res1(postAs(vladaKey, [{ id: 'p6u', ts: '2026-11-05T10:06:30Z', type: 'undo', undoOf: 'p6' }])), 'отменено');
+assert.strictEqual(byCode('2000000400005')[hm['Размещено кем']], 'Ольга', 'вернулось «кем» до перепика');
+assert.strictEqual(byCode('2000000400005')[hm['Размещено']], '05.11.2026 13:05:00', 'вернулось время Ольги');
+assert.strictEqual(byCode('2000000400005')[hm['Место хранения']], 'С30-П1');
+const jh = sheets['Журнал размещения'].rows[0];
+assert.strictEqual(jh[21], 'к событию'); assert.strictEqual(jh[22], 'было: кем');
+
 // справочник: все листы «Архив…» (новый архив подхватывается сам)
 const AH = ['', 'Название книги', 'Авторы', 'Место хранения', 'НАШ ШТРИХКОД'];
 sheets['Архив 1-7595'] = new Sheet('Архив 1-7595', [AH, [1, 'Старая 1', '', 'С1-П1', 2000000000111]]);
@@ -192,4 +258,4 @@ sheets['Книги'] = sheets['Лист1']; delete sheets['Лист1'];
 const cat2 = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'catalog' } }).text);
 assert.ok(cat2.ok && cat2.books['2000000311869'], 'переименованный Лист1 найден по gid 0');
 
-console.log('Все проверки пройдены:', 'Core + события + отмена + перемещение + справочник');
+console.log('Все проверки пройдены:', 'Core + события + безопасная отмена + перемещение + справочник');
