@@ -12,6 +12,7 @@
  */
 
 // ---------------------------------------------------------------- настройки
+var SCRIPT_VERSION = '1.9.2';   // видно в приложении: Меню -> «скрипт …»
 // Какую таблицу открывать. Адрес таблицы: docs.google.com/spreadsheets/d/<ВОТ ЭТО>/edit
 var SPREADSHEET_ID = '1AW5En8QFA7IRrn9FBgCT-TJU_8Qapbmqs4iojxsCsHE';   // ТЕСТ OzonBooks
 
@@ -321,7 +322,7 @@ function json_(o) {
 function doGet(e) {
   try {
     var user = auth_(e.parameter.key);
-    if (e.parameter.action === 'ping') return json_({ ok: true, user: user, table: ss_().getName() });
+    if (e.parameter.action === 'ping') return json_({ ok: true, user: user, table: ss_().getName(), ver: SCRIPT_VERSION });
     if (e.parameter.action === 'catalog') return json_(catalog_());
     if (e.parameter.action === 'orders') return json_(wbOrders_());
     return json_({ ok: false, error: 'неизвестное действие' });
@@ -340,7 +341,7 @@ function catalog_() {
   });
   var stock = readTable_(CFG.STOCK_SHEET, { barcode: CFG.STOCK_COL.barcode, title: CFG.STOCK_COL.title,
     author: CFG.STOCK_COL.author, cell: CFG.STOCK_COL.cell, article: CFG.STOCK_COL.article, free: CFG.STOCK_COL.free });
-  return { ok: true, version: new Date().toISOString(), table: ss_().getName(), packages: packages_(),
+  return { ok: true, version: new Date().toISOString(), table: ss_().getName(), ver: SCRIPT_VERSION, packages: packages_(),
            books: Core.buildCatalog(books, archive, stock) };
 }
 
@@ -530,13 +531,13 @@ function wbCard_(nm) {
 function wbCards_(nmIds) {
   var cache = CacheService.getScriptCache(), out = {}, errs = [], t0 = Date.now();
   nmIds.forEach(function (nm) {
-    var c = cache.get('nm:' + nm);
-    if (c) { out[nm] = JSON.parse(c); return; }
+    var c = cache.get('card2:' + nm);                 // 'card2:' — память прежних версий (с пустыми карточками) не используем
+    if (c) { var hit = JSON.parse(c); if (hit.photo) { out[nm] = hit; return; } }
     if (Date.now() - t0 > 20000) { errs.push('не успела — остальные фото при следующем обновлении'); return; }   // не держать телефон дольше 20 с
     try {
       var info = wbCard_(nm);
       out[nm] = info;
-      if (info.photo) cache.put('nm:' + nm, JSON.stringify(info), WB.CACHE_SEC);   // пустое не кэшируем
+      if (info.photo) cache.put('card2:' + nm, JSON.stringify(info), WB.CACHE_SEC);   // пустое не кэшируем
       Utilities.sleep(650);                                                    // ~100 запросов в минуту
     } catch (e) { errs.push(String(e.message || e)); }
   });
@@ -555,7 +556,7 @@ function wbOrders_() {
   var cardsErr = '';
   try { cards = wbCards_(Object.keys(nms)); cardsErr = cards._err || ''; } catch (e) { cardsErr = String(e.message || e); }
   return {
-    ok: true, at: new Date().toISOString(), cardsErr: cardsErr,
+    ok: true, at: new Date().toISOString(), cardsErr: cardsErr, ver: SCRIPT_VERSION,
     orders: orders.map(function (o) {
       var c = cards[o.nmId] || {};
       return { id: o.id, article: o.article || '', barcode: Core.barcodeFromArticle(o.article), skus: o.skus || [],

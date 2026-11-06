@@ -269,6 +269,7 @@ const cacheStore = {};
 ctx.CacheService = { getScriptCache: () => ({ get: k => cacheStore[k] || null, put: (k, v) => { cacheStore[k] = v; } }) };
 ctx.Utilities.sleep = () => {};
 const resp = (code, obj) => ({ getResponseCode: () => code, getContentText: () => JSON.stringify(obj) });
+cacheStore['card2:501'] = JSON.stringify({ photo: '', brand: '', title: '' });   // пустая запись из прошлой версии
 let busyOnce = true;            // первый запрос карточки — «подождите» (429), потом нормально
 const noPhoto = new Set([503]);
 ctx.UrlFetchApp = {
@@ -293,7 +294,7 @@ assert.strictEqual(o.orders[0].brand, 'Современник');
 assert.strictEqual(o.orders[0].price, 131100);
 assert.strictEqual(o.orders[0].finalPrice, 120000);
 assert.strictEqual(o.orders[2].photo, '');
-assert.ok(!cacheStore['nm:503'], 'карточка без фото не кэшируется');
+assert.ok(!cacheStore['card2:503'], 'карточка без фото не кэшируется');
 const n1 = wbCalls.length;
 noPhoto.clear();
 o = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'orders' } }).text);

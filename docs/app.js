@@ -4,7 +4,7 @@
 
 const API = window.RAZM_API ||
   'https://script.google.com/macros/s/AKfycbxzKklN_XquWi7e9ZKml2iGv7lnRI_gpab86hkXPs7SxT-FT3N4hD2cqfMTwvAksUxyPw/exec';
-const APP_VERSION = '1.9.1';
+const APP_VERSION = '1.9.2';
 const ORDERS_EVERY_MS = 3 * 60 * 1000;      // вкладка «Заказы» открыта — обновлять раз в 3 минуты
 const CATALOG_EVERY_MS = 10 * 60 * 1000;     // пока приложение открыто — обновлять справочник раз в 10 минут
 const CATALOG_STALE_MS = 30 * 60 * 1000;     // старше — кнопка «Справочник» жёлтая
@@ -134,6 +134,7 @@ async function api(method, params, body) {
   catch (e) { throw new Error('таблица ответила не так — скрипт не опубликован или нужно разрешение'); }
   if (!j.ok) throw new Error(j.error || 'ошибка таблицы');
   if (j.table) S.table = j.table;
+  if (j.ver) S.scriptVer = j.ver;
   return j;
 }
 
@@ -985,7 +986,7 @@ function bind() {
   $('camBtn').onclick = openCamera;
   $('camClose').onclick = closeCamera;
   $('menuBtn').onclick = () => {
-    $('mInfo').textContent = `Версия ${APP_VERSION} · таблица: ${S.table || 'неизвестно'} · справочник: ${S.catalogAt ? new Date(S.catalogAt).toLocaleString('ru-RU') : 'не загружен'} · книг в справочнике: ${Object.keys(S.catalog).length}`;
+    $('mInfo').textContent = `Версия ${APP_VERSION} · скрипт ${S.scriptVer || 'старый'} · таблица: ${S.table || 'неизвестно'} · справочник: ${S.catalogAt ? new Date(S.catalogAt).toLocaleString('ru-RU') : 'не загружен'} · книг в справочнике: ${Object.keys(S.catalog).length}`;
     $('menuSheet').classList.remove('hidden');
   };
   $('mClose').onclick = () => { $('menuSheet').classList.add('hidden'); focusScan(); };
