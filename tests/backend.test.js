@@ -267,30 +267,41 @@ props.WB_TOKEN = 'test-token';
 const wbCalls = [];
 const cacheStore = {};
 ctx.CacheService = { getScriptCache: () => ({ get: k => cacheStore[k] || null, put: (k, v) => { cacheStore[k] = v; } }) };
+ctx.Utilities.sleep = () => {};
 const resp = (code, obj) => ({ getResponseCode: () => code, getContentText: () => JSON.stringify(obj) });
+let busyOnce = true;            // первый запрос карточки — «подождите» (429), потом нормально
+const noPhoto = new Set([503]);
 ctx.UrlFetchApp = {
   fetch: (url, opts) => {
     wbCalls.push(url); assert.strictEqual(opts.headers.Authorization, 'test-token');
-    return resp(200, { orders: [
-      { id: 11, article: 'С35-П5_2000000289069', nmId: 501, createdAt: '2026-11-05T20:55:00Z', convertedPrice: 131100, skus: ['2000000289069'] },
-      { id: 12, article: 'С4-П2_2000000311869', nmId: 502, createdAt: '2026-11-05T21:10:00Z', price: 50000 } ] });
-  },
-  fetchAll: reqs => reqs.map(rq => {
-    wbCalls.push(rq.url);
-    const nm = Number(JSON.parse(rq.payload).settings.filter.textSearch);
+    if (url.includes('orders/new')) return resp(200, { orders: [
+      { id: 11, article: 'С35-П5_2000000289069', nmId: 501, createdAt: '2026-11-05T20:55:00Z', price: 131100, salePrice: 168600, finalPrice: 120000, skus: ['2000000289069'] },
+      { id: 12, article: 'С4-П2_2000000311869', nmId: 502, createdAt: '2026-11-05T21:10:00Z', price: 50000 },
+      { id: 13, article: 'С4-П3_2000000311876', nmId: 503, createdAt: '2026-11-05T21:20:00Z', price: 40000 } ] });
+    if (busyOnce) { busyOnce = false; return resp(429, {}); }
+    const nm = Number(JSON.parse(opts.payload).settings.filter.textSearch);
+    if (noPhoto.has(nm)) return resp(200, { cards: [] });
     return resp(200, { cards: [{ nmID: nm, title: 'Книга ' + nm, brand: 'Современник', photos: [{ c246x328: 'https://img/' + nm + '.webp' }] }] });
-  })
+  }
 };
 o = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'orders' } }).text);
 assert.ok(o.ok, o.error);
-assert.strictEqual(o.orders.length, 2);
+assert.strictEqual(o.orders.length, 3);
 assert.strictEqual(o.orders[0].barcode, '2000000289069');
-assert.strictEqual(o.orders[0].photo, 'https://img/501.webp');
+assert.strictEqual(o.orders[0].photo, 'https://img/501.webp', 'после «подождите» (429) фото всё равно получено');
 assert.strictEqual(o.orders[0].brand, 'Современник');
 assert.strictEqual(o.orders[0].price, 131100);
+assert.strictEqual(o.orders[0].finalPrice, 120000);
+assert.strictEqual(o.orders[2].photo, '');
+assert.ok(!cacheStore['nm:503'], 'карточка без фото не кэшируется');
 const n1 = wbCalls.length;
+noPhoto.clear();
 o = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'orders' } }).text);
-assert.strictEqual(wbCalls.length - n1, 1, 'фото берутся из кэша, второй раз — только список заказов');
+assert.strictEqual(wbCalls.length - n1, 2, 'второй раз: список заказов + только карточка, которой не было в кэше');
+assert.strictEqual(o.orders[2].photo, 'https://img/503.webp', 'фото появилось при следующем обновлении');
+ctx.UrlFetchApp.fetch = (url) => url.includes('orders/new') ? resp(200, { orders: [{ id: 14, nmId: 900, article: 'x' }] }) : resp(401, {});
+o = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'orders' } }).text);
+assert.ok(o.ok && o.cardsErr.includes('401'), 'ошибка карточек видна: ' + o.cardsErr);
 ctx.UrlFetchApp.fetch = () => resp(401, {});
 o = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'orders' } }).text);
 assert.ok(!o.ok && o.error.includes('401'), o.error);

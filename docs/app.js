@@ -4,7 +4,7 @@
 
 const API = window.RAZM_API ||
   'https://script.google.com/macros/s/AKfycbxzKklN_XquWi7e9ZKml2iGv7lnRI_gpab86hkXPs7SxT-FT3N4hD2cqfMTwvAksUxyPw/exec';
-const APP_VERSION = '1.9';
+const APP_VERSION = '1.9.1';
 const ORDERS_EVERY_MS = 3 * 60 * 1000;      // вкладка «Заказы» открыта — обновлять раз в 3 минуты
 const CATALOG_EVERY_MS = 10 * 60 * 1000;     // пока приложение открыто — обновлять справочник раз в 10 минут
 const CATALOG_STALE_MS = 30 * 60 * 1000;     // старше — кнопка «Справочник» жёлтая
@@ -594,7 +594,7 @@ function renderOrders() {
     const t = document.createElement('b'); t.textContent = o.title || (x.b && x.b.t) || 'Без названия';
     const a = document.createElement('span'); a.textContent = 'Арт. ' + (o.article || '—');
     const p = document.createElement('span');
-    const rub = o.salePrice || o.price ? Math.round((o.salePrice || o.price) / 100).toLocaleString('ru-RU') + ' ₽' : '';
+    const rub = o.price ? Math.round(o.price / 100).toLocaleString('ru-RU') + ' ₽' : '';   // как в приложении WB (цена с учётом скидок)
     p.textContent = [o.brand, rub, o.createdAt ? ago(o.createdAt) : ''].filter(Boolean).join(' · ');
     mid.append(t, a, p);
     const c = document.createElement('div'); c.className = 'ord-cell';

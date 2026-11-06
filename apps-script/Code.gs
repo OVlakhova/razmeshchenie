@@ -511,34 +511,36 @@ function wbParse_(r) {
   return JSON.parse(r.getContentText() || '{}');
 }
 
-/** Фото, издательство и название из карточки WB — с кэшем на 6 часов. */
+/** Одна карточка WB по nmId: {photo, brand, title} или ошибка. При «подождите» (429) — повтор. */
+function wbCard_(nm) {
+  var req = { method: 'post', contentType: 'application/json', muteHttpExceptions: true, headers: { Authorization: wbToken_() },
+              payload: JSON.stringify({ settings: { filter: { textSearch: String(nm), withPhoto: -1 }, cursor: { limit: 10 } } }) };
+  for (var attempt = 0; attempt < 3; attempt++) {
+    var r = UrlFetchApp.fetch(WB.CARDS, req);
+    if (r.getResponseCode() === 429) { Utilities.sleep(1500 * (attempt + 1)); continue; }
+    var cards = (wbParse_(r).cards || []).filter(function (c) { return String(c.nmID) === String(nm); });
+    if (!cards[0]) return { photo: '', brand: '', title: '', none: true };
+    var ph = (cards[0].photos || [])[0] || {};
+    return { photo: ph.c246x328 || ph.square || ph.tm || ph.big || '', brand: cards[0].brand || '', title: cards[0].title || '' };
+  }
+  throw new Error('WB просит подождать (429)');
+}
+
+/** Фото, издательство и название из карточек — по одной, без спешки (лимит WB), найденные — в кэш на 6 часов. */
 function wbCards_(nmIds) {
-  var cache = CacheService.getScriptCache(), out = {}, need = [];
+  var cache = CacheService.getScriptCache(), out = {}, errs = [], t0 = Date.now();
   nmIds.forEach(function (nm) {
     var c = cache.get('nm:' + nm);
-    if (c) out[nm] = JSON.parse(c); else need.push(nm);
-  });
-  for (var i = 0; i < need.length; i += 10) {           // по 10 параллельно, чтобы не упереться в лимит WB
-    var part = need.slice(i, i + 10);
-    var reqs = part.map(function (nm) {
-      return { url: WB.CARDS, method: 'post', contentType: 'application/json', muteHttpExceptions: true,
-               headers: { Authorization: wbToken_() },
-               payload: JSON.stringify({ settings: { filter: { textSearch: String(nm), withPhoto: -1 }, cursor: { limit: 10 } } }) };
-    });
-    var resp = UrlFetchApp.fetchAll(reqs);
-    for (var k = 0; k < resp.length; k++) {
-      var nm = part[k], info = { photo: '', brand: '', title: '' };
-      try {
-        var cards = (wbParse_(resp[k]).cards || []).filter(function (c) { return Number(c.nmID) === Number(nm); });
-        if (cards[0]) {
-          var ph = (cards[0].photos || [])[0] || {};
-          info = { photo: ph.c246x328 || ph.square || ph.tm || ph.big || '', brand: cards[0].brand || '', title: cards[0].title || '' };
-        }
-      } catch (e) { info.err = String(e.message || e); }
+    if (c) { out[nm] = JSON.parse(c); return; }
+    if (Date.now() - t0 > 20000) { errs.push('не успела — остальные фото при следующем обновлении'); return; }   // не держать телефон дольше 20 с
+    try {
+      var info = wbCard_(nm);
       out[nm] = info;
-      if (!info.err) cache.put('nm:' + nm, JSON.stringify(info), WB.CACHE_SEC);
-    }
-  }
+      if (info.photo) cache.put('nm:' + nm, JSON.stringify(info), WB.CACHE_SEC);   // пустое не кэшируем
+      Utilities.sleep(650);                                                    // ~100 запросов в минуту
+    } catch (e) { errs.push(String(e.message || e)); }
+  });
+  if (errs.length) out._err = errs.length + ' без фото: ' + errs[0];
   return out;
 }
 
@@ -551,17 +553,29 @@ function wbOrders_() {
   orders.forEach(function (o) { if (o.nmId) nms[o.nmId] = 1; });
   var cards = {};
   var cardsErr = '';
-  try { cards = wbCards_(Object.keys(nms)); } catch (e) { cardsErr = String(e.message || e); }
+  try { cards = wbCards_(Object.keys(nms)); cardsErr = cards._err || ''; } catch (e) { cardsErr = String(e.message || e); }
   return {
     ok: true, at: new Date().toISOString(), cardsErr: cardsErr,
     orders: orders.map(function (o) {
       var c = cards[o.nmId] || {};
       return { id: o.id, article: o.article || '', barcode: Core.barcodeFromArticle(o.article), skus: o.skus || [],
                nmId: o.nmId || '', createdAt: o.createdAt || '', price: o.convertedPrice || o.price || 0,
-               salePrice: o.salePrice || o.finalPrice || 0, cargoType: o.cargoType || '',
+               salePrice: o.salePrice || 0, finalPrice: o.convertedFinalPrice || o.finalPrice || 0, cargoType: o.cargoType || '',
                photo: c.photo || '', brand: c.brand || '', title: c.title || '' };
     })
   };
+}
+
+/** Проверка связи с WB из редактора: Выполнить -> checkWb. Ключ в журнал не пишется. */
+function checkWb() {
+  var tok = wbToken_();
+  var r = UrlFetchApp.fetch(WB.ORDERS_NEW, { headers: { Authorization: tok }, muteHttpExceptions: true });
+  var orders = (JSON.parse(r.getContentText() || '{}').orders || []);
+  Logger.log('WB заказы: ' + r.getResponseCode() + ', новых: ' + orders.length);
+  if (!orders[0]) return;
+  var o = orders[0];
+  Logger.log('цены ' + o.article + ': price ' + o.price + ', salePrice ' + o.salePrice + ', finalPrice ' + o.finalPrice);
+  Logger.log('карточка: ' + JSON.stringify(wbCard_(o.nmId)));
 }
 
 // для тестов вне Google

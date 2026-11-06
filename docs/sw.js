@@ -1,5 +1,5 @@
 // Работа без сети: оболочка приложения хранится в кэше. Данные (справочник, очередь) — в IndexedDB.
-const VERSION = 'razm-v10';
+const VERSION = 'razm-v11';
 const SHELL = ['./', './index.html', './app.js', './manifest.webmanifest', './icon-192.png', './icon-512.png', './icon-maskable-512.png'];
 
 self.addEventListener('install', e => {
