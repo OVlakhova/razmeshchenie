@@ -4,7 +4,7 @@
 
 const API = window.RAZM_API ||
   'https://script.google.com/macros/s/AKfycbxzKklN_XquWi7e9ZKml2iGv7lnRI_gpab86hkXPs7SxT-FT3N4hD2cqfMTwvAksUxyPw/exec';
-const APP_VERSION = '2.0';
+const APP_VERSION = '2.0.1';
 const ORDERS_EVERY_MS = 3 * 60 * 1000;      // вкладка «Заказы» открыта — обновлять раз в 3 минуты
 const CATALOG_EVERY_MS = 10 * 60 * 1000;     // пока приложение открыто — обновлять справочник раз в 10 минут
 const CATALOG_STALE_MS = 30 * 60 * 1000;     // старше — кнопка «Справочник» жёлтая
@@ -522,8 +522,8 @@ const ST = {
   FLOODS: [['flood_bottom', 'нижний край'], ['flood_top', 'верхний край'], ['flood_side', 'боковой край'], ['flood_part', 'частично']],
   NOTES: [['marks', 'Надписи и пометки'], ['gift', 'Дарственная / автограф']],
 };
-const LABEL = Object.fromEntries([...ST.FORMATS, ...ST.DEFECTS, ...ST.NOTES,
-  ...ST.FLOODS.map(([k, v]) => [k, 'Залив — ' + v])].map(([k, v]) => [k, v.toLowerCase()]));
+const LABEL = {};               // без Object.fromEntries — его нет в Safari старых iPhone
+[...ST.FORMATS, ...ST.DEFECTS, ...ST.NOTES, ...ST.FLOODS.map(([k, v]) => [k, 'Залив — ' + v])].forEach(([k, v]) => { LABEL[k] = v.toLowerCase(); });
 const plainState = () => ({ f: 'normal', d: [], n: [], o: '' });
 const isPlainState = st => st.f === 'normal' && !st.d.length && !st.n.length && !st.o;
 const hasDefect = st => !!(st.d.length || st.o);
@@ -1000,7 +1000,10 @@ async function openCamera() {
       await Cam.reader.decodeFromConstraints({ video: { facingMode: 'environment' } }, video, res => { if (res && Cam.busy) done(res.getText()); });
     }
   } catch (e) {
-    $('camMsg').textContent = 'Камера недоступна: ' + (e.message || e.name || e) + '. Разрешите доступ к камере в настройках Chrome.';
+    const noApi = !(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+    $('camMsg').textContent = noApi
+      ? 'Камера здесь недоступна. На старом iPhone откройте приложение в Safari (не со значка на экране «Домой») — или введите цифры наклейки ниже.'
+      : 'Камера недоступна: ' + (e.message || e.name || e) + '. Разрешите доступ к камере в настройках браузера — или введите цифры ниже.';
   }
 }
 
@@ -1018,7 +1021,7 @@ function closeCamera() {
 
 // поле сканера всегда в фокусе
 function focusScan() {
-  if (document.activeElement && document.activeElement.id === 'otherDef') return;   // пишут «другой дефект»
+  if (document.activeElement && (document.activeElement.id === 'otherDef' || document.activeElement.id === 'camCode')) return;   // пишут «другой дефект»
   if (!$('manualSheet').classList.contains('hidden') || !$('menuSheet').classList.contains('hidden') || !$('camSheet').classList.contains('hidden')) return;
   if (!$('mainView').classList.contains('hidden')) $('scan').focus({ preventScroll: true });
 }
@@ -1151,6 +1154,9 @@ function bind() {
   };
   $('camBtn').onclick = openCamera;
   $('camClose').onclick = closeCamera;
+  const camOk = () => { const v = $('camCode').value.replace(/\D/g, ''); if (!v) return; $('camCode').value = ''; closeCamera(); onScan(v); };
+  $('camCodeOk').onclick = camOk;
+  $('camCode').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); camOk(); } });
   $('menuBtn').onclick = () => {
     $('mInfo').textContent = `Версия ${APP_VERSION} · скрипт ${S.scriptVer || 'старый'} · таблица: ${S.table || 'неизвестно'} · справочник: ${S.catalogAt ? new Date(S.catalogAt).toLocaleString('ru-RU') : 'не загружен'} · книг в справочнике: ${Object.keys(S.catalog).length}`;
     $('menuSheet').classList.remove('hidden');
