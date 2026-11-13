@@ -12,7 +12,7 @@
  */
 
 // ---------------------------------------------------------------- настройки
-var SCRIPT_VERSION = '1.9.2';   // видно в приложении: Меню -> «скрипт …»
+var SCRIPT_VERSION = '2.0';   // видно в приложении: Меню -> «скрипт …»
 // Какую таблицу открывать. Адрес таблицы: docs.google.com/spreadsheets/d/<ВОТ ЭТО>/edit
 var SPREADSHEET_ID = '1AW5En8QFA7IRrn9FBgCT-TJU_8Qapbmqs4iojxsCsHE';   // ТЕСТ OzonBooks
 
@@ -22,6 +22,7 @@ var CFG = {
   STOCK_SHEET: 'Остатки 1С',         // выгрузка 1С, только для поиска, НЕ меняется
   JOURNAL_SHEET: 'Журнал размещения',
   ERRORS_SHEET: 'Ошибки',
+  STATE_SHEET: 'Состояние',          // формат, дефекты, особенности по штрихкоду (фотостол и размещение)
   // Стандартные упаковки (из списка владелицы, 04.11.2026). Д = длина, Ш = ширина, В = высота, см.
   PACKAGES: [
     { name: '201 - 2 см.', L: 25, W: 17, H: 2 }, { name: '201 - 4 см.', L: 25, W: 17, H: 4 },
@@ -47,13 +48,23 @@ var CFG = {
                author: 'Автор ("Общие")', free: 'Свободно' }
 };
 
+// Состояние книги. Ключи — для приложения, подписи — для таблицы и текста карточки.
+var STATE = {
+  FORMATS: { normal: 'обычный', reduced: 'уменьшенный', pocket: 'карманный' },
+  DEFECTS: { skew: 'скос блока', flood: 'залив', flood_bottom: 'залив — нижний край', flood_top: 'залив — верхний край',
+             flood_side: 'залив — боковой край', flood_part: 'залив — частично', tear: 'надрыв страницы',
+             notitle: 'нет титульного листа', missing: 'нет страниц', stains: 'пятна' },
+  NOTES: { marks: 'надписи и пометки', gift: 'дарственная надпись / автограф' }
+};
+var STATE_HEADER = ['штрихкод', 'формат', 'дефекты', 'особенности', 'другой дефект', 'кто', 'когда', 'id события'];
+
 var JOURNAL_HEADER = ['id события', 'получено', 'время скана', 'кто', 'устройство', 'действие',
   'штрихкод', 'ячейка', 'упаковка', 'Д', 'Ш', 'В', 'результат', 'строка',
   'было: ячейка', 'было: артикул', 'было: упаковка', 'было: Д', 'было: Ш', 'было: В', 'было: размещено',
   'к событию',      // исправление упаковки -> id исходного пика; отмена -> id отменённого пика
-  'было: кем'];
+  'было: кем', 'состояние'];
 var J = { id: 0, ts: 2, type: 5, barcode: 6, cell: 7, result: 12, row: 13, prevCell: 14, prevArticle: 15, prevPkg: 16,
-          prevL: 17, prevW: 18, prevH: 19, prevAt: 20, ref: 21, prevBy: 22 };
+          prevL: 17, prevW: 18, prevH: 19, prevAt: 20, ref: 21, prevBy: 22, state: 23 };
 
 // ============================================================ ЧИСТАЯ ЛОГИКА
 // (без обращений к таблице — проверяется тестами вне Google)
@@ -164,6 +175,51 @@ Core.applyPlace = function (row, ev) {
 };
 
 /** Отмена: вернуть значения "было" из записи журнала исходного события. */
+/** Проверить и привести состояние с телефона к виду {f, d:[ключи], n:[ключи], o:'текст'}; null — ошибка. */
+Core.normState = function (st) {
+  if (!st || typeof st !== 'object') return null;
+  var f = String(st.f || 'normal');
+  if (!STATE.FORMATS[f]) return null;
+  var d = [], n = [];
+  var floods = 0;
+  for (var i = 0; i < (st.d || []).length; i++) {
+    var k = String(st.d[i]);
+    if (!STATE.DEFECTS[k]) return null;
+    if (k.indexOf('flood') === 0) { if (floods++) continue; }          // залив — один вариант
+    if (d.indexOf(k) < 0) d.push(k);
+  }
+  for (var j = 0; j < (st.n || []).length; j++) {
+    var m = String(st.n[j]);
+    if (!STATE.NOTES[m]) return null;
+    if (n.indexOf(m) < 0) n.push(m);
+  }
+  return { f: f, d: d, n: n, o: String(st.o || '').trim().slice(0, 200) };
+};
+Core.stateRow = function (st) {
+  return [STATE.FORMATS[st.f], st.d.map(function (k) { return STATE.DEFECTS[k]; }).join('; '),
+          st.n.map(function (k) { return STATE.NOTES[k]; }).join('; '), st.o];
+};
+Core.stateFromRow = function (fmt, def, notes, other) {
+  function back(dict, text) {
+    var out = [];
+    String(text || '').split(';').forEach(function (t) {
+      t = t.trim(); if (!t) return;
+      for (var k in dict) if (dict[k] === t) { out.push(k); return; }
+    });
+    return out;
+  }
+  var f = 'normal';
+  for (var k in STATE.FORMATS) if (STATE.FORMATS[k] === String(fmt || '').trim()) f = k;
+  return { f: f, d: back(STATE.DEFECTS, def), n: back(STATE.NOTES, notes), o: String(other || '').trim() };
+};
+Core.stateText = function (st) {           // для журнала: «карманный; скос блока; пятна; другое: …; надписи и пометки»
+  var r = Core.stateRow(st), parts = [r[0]];
+  if (r[1]) parts.push(r[1]);
+  if (r[3]) parts.push('другое: ' + r[3]);
+  if (r[2]) parts.push(r[2]);
+  return parts.join('; ');
+};
+
 Core.undoChanges = function (prev) {
   return { cell: prev.cell, article: prev.article, pkg: prev.pkg, L: prev.L, W: prev.W, H: prev.H,
            placedAt: prev.placedAt, placedBy: prev.placedBy || '' };
@@ -264,6 +320,30 @@ function readTable_(sheetOrName, colNames) {
 
 function packages_() { return CFG.PACKAGES; }
 
+function stateSheet_(ss) {
+  ss = ss || ss_();
+  var sh = ss.getSheetByName(CFG.STATE_SHEET);
+  if (!sh) {
+    sh = ss.insertSheet(CFG.STATE_SHEET);
+    sh.getRange(1, 1, 1, STATE_HEADER.length).setValues([STATE_HEADER]).setFontWeight('bold');
+    sh.setFrozenRows(1);
+  }
+  return sh;
+}
+
+/** Все отметки: штрихкод -> {f, d, n, o}. */
+function states_(ss) {
+  var sh = (ss || ss_()).getSheetByName(CFG.STATE_SHEET);
+  var out = {};
+  if (!sh || sh.getLastRow() < 2) return out;
+  var v = sh.getRange(2, 1, sh.getLastRow() - 1, 5).getValues();
+  for (var i = 0; i < v.length; i++) {
+    var bc = Core.normBarcode(v[i][0]);
+    if (bc) out[bc] = Core.stateFromRow(v[i][1], v[i][2], v[i][3], v[i][4]);
+  }
+  return out;
+}
+
 // ------------------------------------------------------------ ключи устройств
 function users_() {
   var raw = PropertiesService.getScriptProperties().getProperty('DEVICE_KEYS');
@@ -294,6 +374,7 @@ function setup() {
     j.getRange(1, 1, 1, JOURNAL_HEADER.length).setValues([JOURNAL_HEADER]).setFontWeight('bold');
     j.setFrozenRows(1);
   }
+  stateSheet_(ss);
   if (!ss.getSheetByName(CFG.ERRORS_SHEET)) {
     var e = ss.insertSheet(CFG.ERRORS_SHEET);
     e.getRange(1, 1, 1, 6).setValues([['получено', 'кто', 'id события', 'штрихкод', 'ячейка', 'причина']]).setFontWeight('bold');
@@ -342,7 +423,7 @@ function catalog_() {
   var stock = readTable_(CFG.STOCK_SHEET, { barcode: CFG.STOCK_COL.barcode, title: CFG.STOCK_COL.title,
     author: CFG.STOCK_COL.author, cell: CFG.STOCK_COL.cell, article: CFG.STOCK_COL.article, free: CFG.STOCK_COL.free });
   return { ok: true, version: new Date().toISOString(), table: ss_().getName(), ver: SCRIPT_VERSION, packages: packages_(),
-           books: Core.buildCatalog(books, archive, stock) };
+           books: Core.buildCatalog(books, archive, stock), states: states_(ss) };
 }
 
 /**
@@ -380,6 +461,21 @@ function processEvents_(user, device, events) {
   if (String(journal.getRange(1, J.ref + 1).getValue()) !== JOURNAL_HEADER[J.ref]) {      // журнал старого вида — дописать заголовки
     journal.getRange(1, J.ref + 1, 1, 2).setValues([[JOURNAL_HEADER[J.ref], JOURNAL_HEADER[J.prevBy]]]).setFontWeight('bold');
   }
+  if (String(journal.getRange(1, J.state + 1).getValue()) !== JOURNAL_HEADER[J.state]) {
+    journal.getRange(1, J.state + 1).setValue(JOURNAL_HEADER[J.state]).setFontWeight('bold');
+  }
+  var stSheet = null, stIndex = null;
+  function stateRowFor(bc) {        // номер строки на листе «Состояние» (создаётся при первой отметке)
+    if (!stSheet) {
+      stSheet = stateSheet_(ss); stIndex = {};
+      if (stSheet.getLastRow() > 1) {
+        var sv = stSheet.getRange(2, 1, stSheet.getLastRow() - 1, 1).getValues();
+        for (var s = 0; s < sv.length; s++) { var k = Core.normBarcode(sv[s][0]); if (k) stIndex[k] = s + 2; }
+      }
+    }
+    if (!stIndex[bc]) stIndex[bc] = Math.max(stSheet.getLastRow(), 1) + 1;
+    return stIndex[bc];
+  }
   var done = {}, lastBy = {};
   function track(vals) {           // последнее применённое событие по штрихкоду — для проверки отмены
     var bc = Core.normBarcode(vals[J.barcode]), type = String(vals[J.type]), res = String(vals[J.result]);
@@ -409,9 +505,21 @@ function processEvents_(user, device, events) {
     var id = String(ev.id || '');
     if (!id) { out.push({ id: id, result: 'нет id' }); return; }
     if (done[id]) { out.push({ id: id, result: 'уже получено' }); return; }
-    var res, rowNum = '', prev = {}, pkg = ev.pkg || null, ref = '';
+    var res, rowNum = '', prev = {}, pkg = ev.pkg || null, ref = '', stText = '';
     try {
-      if (ev.type === 'undo') {
+      if (ev.type === 'state') {
+        var sc = Core.classify(ev.barcode);
+        if (sc.kind !== 'book') throw new Error('некорректный штрихкод «' + sc.code + '»');
+        ev.barcode = sc.code;
+        var st = Core.normState(ev.state);
+        if (!st) throw new Error('непонятная отметка состояния');
+        var sr = stateRowFor(sc.code);
+        stSheet.getRange(sr, 1).setNumberFormat('@');
+        stSheet.getRange(sr, 7).setNumberFormat('@');
+        stSheet.getRange(sr, 1, 1, STATE_HEADER.length).setValues([[sc.code].concat(Core.stateRow(st), [user, Core.msk(ev.ts || now), id])]);
+        stText = Core.stateText(st);
+        res = 'ok';
+      } else if (ev.type === 'undo') {
         ref = String(ev.undoOf || '');
         var orig = done[ref];
         if (!orig) throw new Error('не найдено событие для отмены');
@@ -457,7 +565,7 @@ function processEvents_(user, device, events) {
     var jrow = [id, Core.msk(now), Core.msk(ev.ts), user, device, String(ev.type || ''), String(ev.barcode || ''),
       String(ev.cell || ''), pkg ? (pkg.name || '') : '', pkg ? (pkg.L || '') : '', pkg ? (pkg.W || '') : '',
       pkg ? (pkg.H || '') : '', res, rowNum, prev.cell || '', prev.article || '', prev.pkg || '',
-      prev.L || '', prev.W || '', prev.H || '', prev.placedAt ? Core.msk(prev.placedAt) : '', ref, prev.placedBy || ''];
+      prev.L || '', prev.W || '', prev.H || '', prev.placedAt ? Core.msk(prev.placedAt) : '', ref, prev.placedBy || '', stText];
     journal.appendRow(jrow);
     journal.getRange(journal.getLastRow(), 2, 1, 2).setNumberFormat('@');   // время — текстом, как написано
     journal.getRange(journal.getLastRow(), 7).setNumberFormat('@');

@@ -62,6 +62,9 @@ def handle(route, request):
     posted[:] = [e for e in posted if e.get("barcode") not in NET["reject"]]
     return route.fulfill(status=200, content_type='application/json', body=json.dumps({"ok": True, "results": res}))
 
+def ean(d12):
+    s = sum(int(c) * (3 if i % 2 else 1) for i, c in enumerate(d12)); return d12 + str((10 - s % 10) % 10)
+NEWBC = ean('200000077700')
 fails = []
 def check(cond, msg):
     print(('OK   ' if cond else 'FAIL ') + msg)
@@ -348,6 +351,55 @@ with sync_playwright() as p:
     check('picked' in page.get_attribute('#ord-5', 'class'), 'отметка «взята» пережила обновление страницы')
     check(len(posted) == n_post, 'вкладка «Заказы» ничего не отправляет в таблицу')
     page.click('#modePlace'); page.wait_for_timeout(200)
+
+    # «Фотостол»: отметки состояния до описания книги
+    page.click('#modePhoto'); page.wait_for_timeout(200)
+    check(page.is_visible('#photoView') and not page.is_visible('#stateBlock'), 'фотостол открыт, блок состояния ждёт книгу')
+    scan(NEWBC[:-1] + str((int(NEWBC[-1]) + 1) % 10)); page.wait_for_timeout(200)
+    check('НАКЛЕЙКА НЕ СЧИТАЛАСЬ' in st(), 'кривая наклейка — не сохраняем')
+    scan(NEWBC); page.wait_for_timeout(300)
+    check(page.is_visible('#stateBlock') and 'Новая книга' in st(), 'новая книга (ещё не в таблице) — можно отметить')
+    n0 = len(posted)
+    page.locator('#fmtSeg .chip', has_text='Карманный').click()
+    page.locator('#defChips .chip', has_text='Скос блока').click()
+    page.locator('#defChips .chip', has_text='Залив').click()
+    check(page.is_visible('#floodChips'), 'у залива появились уточнения')
+    page.locator('#floodChips .chip', has_text='нижний край').click()
+    page.locator('#noteChips .chip', has_text='Надписи и пометки').click()
+    check('ДЕФЕКТ' in page.inner_text('#stSummary') and 'карманный' in page.inner_text('#stSummary'), 'итог: ' + page.inner_text('#stSummary'))
+    page.screenshot(path='/tmp/razm_photo.png', full_page=True)
+    page.wait_for_timeout(1500 + 5500)
+    sts = [e for e in posted[n0:] if e.get('type') == 'state']
+    check(len(sts) == 1 and sts[0]['barcode'] == NEWBC and sts[0]['state'] == {'f': 'pocket', 'd': ['skew', 'flood_bottom'], 'n': ['marks'], 'o': ''},
+          'отметки ушли одним событием: ' + str([e.get('state') for e in sts]))
+    check('ДЕФЕКТ' in page.inner_text('#photoList'), 'в списке фотостола видно, что отмечено')
+    # другой дефект + сканер, «впечатавший» код в поле
+    page.locator('#defChips .chip', has_text='Другое').click(); page.wait_for_timeout(100)
+    page.fill('#otherDef', 'надорван форзац')
+    page.wait_for_timeout(1600)
+    page.focus('#otherDef'); page.keyboard.type('2000000311869'); page.keyboard.press('Enter'); page.wait_for_timeout(400)
+    check(page.input_value('#otherDef') == '' or 'КНИГА' in st() or 'УЖЕ' in st(), 'код из сканера не остался в поле дефекта')
+    page.wait_for_timeout(6500)
+    last = [e for e in posted if e.get('type') == 'state' and e['barcode'] == NEWBC][-1]
+    check(last['state']['o'] == 'надорван форзац', 'другой дефект сохранён: ' + str(last['state']))
+    # повторный пик той же книги — правка
+    page.wait_for_timeout(1600)
+    scan(NEWBC); page.wait_for_timeout(300)
+    check('УЖЕ ОТМЕЧЕНА' in st() and page.locator('#fmtSeg .chip.on').inner_text() == 'Карманный', 'повторный пик — отметки на месте')
+    # размещение: отметки с фотостола уже выбраны
+    BOOKS[NEWBC] = {"t": "Описанная после фотостола", "a": "", "s": {}, "n": 1, "q": 1, "c": "", "d": [25, 17, 2]}
+    page.click('#modePlace'); page.wait_for_timeout(200)
+    page.click('#catBtn'); page.wait_for_timeout(800)
+    scan('991019005'); page.wait_for_timeout(1600)
+    scan(NEWBC); page.wait_for_timeout(400)
+    check(page.is_visible('#stateBlock') and page.locator('#fmtSeg .chip.on').inner_text() == 'Карманный' and 'С фотостола' in st(),
+          'при размещении отметки с фотостола уже выбраны: ' + st().replace('\n', ' | '))
+    page.locator('#defChips .chip', has_text='Пятна').click(); page.wait_for_timeout(200)
+    page.screenshot(path='/tmp/razm_place_state.png', full_page=True)
+    page.click('#doneBtn'); page.wait_for_timeout(2500)
+    last = [e for e in posted if e.get('type') == 'state' and e['barcode'] == NEWBC][-1]
+    check('stains' in last['state']['d'] and last['state']['f'] == 'pocket', 'правка у полки ушла: ' + str(last['state']))
+    check(any(e.get('type') == 'place' and e.get('barcode') == NEWBC for e in posted), 'книга размещена')
 
     page.screenshot(path='/tmp/razm_e2e.png')
     check(not errors, 'нет ошибок JavaScript ' + (str(errors) if errors else ''))

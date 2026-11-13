@@ -27,7 +27,7 @@ button{font-family:inherit;color:inherit}
 .infobar.test .tbl{color:var(--warn-ink);font-weight:800;font-size:15px;letter-spacing:.03em}
 .cat.stale{background:var(--warn-bg);border-color:var(--warn);color:var(--warn-ink)}
 .cat{flex:none;height:36px;padding:0 12px;border:1px solid #d4d4cf;border-radius:10px;background:#fff;font-size:14px;font-weight:600}
-.modes{display:flex;gap:8px;padding:8px 12px 0}
+.modes{display:flex;gap:6px;padding:8px 12px 0}
 .orders{margin:8px 12px 0}
 .ord-top{display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:15px;font-weight:700;color:var(--ink);margin-bottom:6px}
 .ord-err{background:var(--warn-bg);color:var(--warn-ink);border-radius:12px;padding:8px 12px;font-size:14px;margin-bottom:6px}
@@ -42,7 +42,21 @@ button{font-family:inherit;color:inherit}
 .ord-cell{flex:none;min-width:74px;text-align:center;font-size:20px;font-weight:800;background:var(--dark);color:#fff;border-radius:10px;padding:8px 6px;line-height:1.1}
 .ord-cell small{display:block;font-size:11px;font-weight:600;color:#d4d4d8;margin-top:3px}
 .ord.picked .ord-cell{background:var(--ok)}
-.modes button{flex:1;height:48px;border:1px solid #d4d4cf;border-radius:12px;background:#fff;font-size:16px;font-weight:600}
+.modes button{flex:1 1 auto;min-width:0;height:48px;padding:0 4px;border:1px solid #d4d4cf;border-radius:12px;background:#fff;font-size:13px;font-weight:600;letter-spacing:-.02em;white-space:nowrap}
+.state{margin-top:4px}
+.state .sec span{font-size:13px;color:var(--quiet)}
+.seg{display:flex;gap:6px;padding:0 12px}
+.chips{display:flex;flex-wrap:wrap;gap:8px;padding:0 12px}
+.chips.sub{margin-top:8px;padding-left:24px}
+.chip{min-height:44px;padding:0 14px;border:1px solid #d4d4cf;border-radius:22px;background:#fff;font-size:15px;font-weight:600}
+.chip.seg-b{flex:1;border-radius:12px;padding:0 4px}
+.chip.small{min-height:40px;font-size:14px}
+.chip.on{background:var(--dark);border-color:var(--dark);color:#fff}
+.chip.bad.on{background:var(--bad);border-color:var(--bad)}
+.sublbl{padding:12px 12px 6px;font-size:13px;font-weight:700;color:var(--quiet);text-transform:uppercase;letter-spacing:.04em}
+.other{display:block;width:calc(100% - 24px);margin:8px 12px 0;height:48px;padding:0 14px;border:2px solid var(--bad);border-radius:12px;font-size:16px;font-family:inherit}
+.st-sum{margin:12px 12px 0;padding:10px 14px;border-radius:12px;background:#fff;font-size:15px;font-weight:600;color:#3f3f46}
+.st-sum.defect{background:var(--bad-bg);color:var(--bad-ink)}
 .modes button.on{background:var(--dark);border-color:var(--dark);color:#fff}
 .cellbar{display:flex;align-items:center;justify-content:space-between;margin:8px 12px 0;padding:10px 14px;background:var(--dark);color:#fff;border-radius:14px}
 .cellbar small{display:block;font-size:13px;color:#d4d4d8}
@@ -134,6 +148,7 @@ button{font-family:inherit;color:inherit}
       <button id="modePlace" type="button" class="on">Размещение</button>
       <button id="modeFind" type="button">Где книга?</button>
       <button id="modeOrders" type="button">Заказы</button>
+      <button id="modePhoto" type="button">Фотостол</button>
     </div>
     <div class="cellbar" id="cellbar">
       <div><small>Ячейка</small><span class="cell" id="cellName">—</span></div>
@@ -160,6 +175,21 @@ button{font-family:inherit;color:inherit}
       <div class="grid" id="pkgGrid"></div>
       <button id="pkgManual" class="wide" type="button">Ручная — ввести размеры</button>
       <div class="hint" id="pkgInfo"></div>
+    </div>
+    <div id="stateBlock" class="state hidden">
+      <div class="sec"><b>Состояние</b><span>не видно на фото — отметьте</span></div>
+      <div class="seg" id="fmtSeg"></div>
+      <div class="sublbl">Дефекты</div>
+      <div class="chips" id="defChips"></div>
+      <div class="chips sub hidden" id="floodChips"></div>
+      <input id="otherDef" class="other hidden" type="text" placeholder="Какой дефект? Например: надорван форзац" autocomplete="off">
+      <div class="sublbl">Особенности (не дефект)</div>
+      <div class="chips" id="noteChips"></div>
+      <div class="st-sum" id="stSummary"></div>
+    </div>
+    <div id="photoView" class="shelf hidden">
+      <div class="ord-top" style="padding:10px 0 4px"><span id="photoHead">Пикните наклейку книги</span></div>
+      <div id="photoList"></div>
     </div>
     <div id="problems" class="problems hidden"></div>
     <div class="shelf" id="shelf"></div>

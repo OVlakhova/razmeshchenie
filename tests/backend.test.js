@@ -239,6 +239,36 @@ assert.strictEqual(byCode('2000000400005')[hm['Место хранения']], '
 const jh = sheets['Журнал размещения'].rows[0];
 assert.strictEqual(jh[21], 'к событию'); assert.strictEqual(jh[22], 'было: кем');
 
+// ---------- состояние книги (фотостол и размещение) ----------
+let rs = post([
+  { id: 'st1', ts: '2026-11-13T10:00:00Z', type: 'state', barcode: '2000000777001', state: { f: 'pocket', d: ['skew', 'flood_bottom'], n: ['marks'], o: '' } },
+  { id: 'st2', ts: '2026-11-13T10:01:00Z', type: 'state', barcode: '2000000777002', state: { f: 'reduced', d: [], n: [], o: 'надорван форзац' } },
+  { id: 'st3', ts: '2026-11-13T10:02:00Z', type: 'state', barcode: '2,00E+12', state: { f: 'normal' } },
+  { id: 'st4', ts: '2026-11-13T10:03:00Z', type: 'state', barcode: '2000000777003', state: { f: 'huge' } },
+]);
+assert.deepStrictEqual(rs.results.map(x => x.result.slice(0, 20)), ['ok', 'ok', 'ошибка: некорректный', 'ошибка: непонятная о']);
+const stSh = sheets['Состояние'];
+assert.ok(stSh, 'лист «Состояние» создан сам');
+assert.deepStrictEqual(stSh.rows[0], ['штрихкод', 'формат', 'дефекты', 'особенности', 'другой дефект', 'кто', 'когда', 'id события']);
+assert.deepStrictEqual(stSh.rows[1].slice(0, 6), ['2000000777001', 'карманный', 'скос блока; залив — нижний край', 'надписи и пометки', '', 'Ольга']);
+assert.deepStrictEqual(stSh.rows[2].slice(0, 5), ['2000000777002', 'уменьшенный', '', '', 'надорван форзац']);
+// повторная отметка той же книги — правка строки, а не вторая строка; два залива -> один
+rs = postAs(vladaKey, [{ id: 'st5', ts: '2026-11-13T11:00:00Z', type: 'state', barcode: '2000000777001', state: { f: 'normal', d: ['flood_top', 'flood_side', 'tear'], n: [], o: '' } }]);
+assert.strictEqual(rs.results[0].result, 'ok');
+assert.strictEqual(stSh.rows.length, 3, 'строк не прибавилось');
+assert.deepStrictEqual(stSh.rows[1].slice(0, 6), ['2000000777001', 'обычный', 'залив — верхний край; надрыв страницы', '', '', 'Влада']);
+const jr = sheets['Журнал размещения'].rows.find(r => r[0] === 'st5');
+assert.strictEqual(jr[23], 'обычный; залив — верхний край; надрыв страницы', 'в журнале видно, что отметили');
+assert.strictEqual(sheets['Журнал размещения'].rows[0][23], 'состояние');
+// справочник отдаёт отметки, и для книг, которых ещё нет в Лист1
+const catS = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'catalog' } }).text);
+assert.deepStrictEqual(catS.states['2000000777001'], { f: 'normal', d: ['flood_top', 'tear'], n: [], o: '' });
+assert.deepStrictEqual(catS.states['2000000777002'], { f: 'reduced', d: [], n: [], o: 'надорван форзац' });
+// повторная отправка — не задваивается
+rs = post([{ id: 'st1', ts: '2026-11-13T10:00:00Z', type: 'state', barcode: '2000000777001', state: { f: 'pocket' } }]);
+assert.strictEqual(rs.results[0].result, 'уже получено');
+assert.strictEqual(stSh.rows[1][1], 'обычный');
+
 // справочник: все листы «Архив…» (новый архив подхватывается сам)
 const AH = ['', 'Название книги', 'Авторы', 'Место хранения', 'НАШ ШТРИХКОД'];
 sheets['Архив 1-7595'] = new Sheet('Архив 1-7595', [AH, [1, 'Старая 1', '', 'С1-П1', 2000000000111]]);
@@ -307,4 +337,4 @@ ctx.UrlFetchApp.fetch = () => resp(401, {});
 o = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'orders' } }).text);
 assert.ok(!o.ok && o.error.includes('401'), o.error);
 
-console.log('Все проверки пройдены:', 'Core + события + безопасная отмена + перемещение + справочник + заказы WB');
+console.log('Все проверки пройдены:', 'Core + события + безопасная отмена + перемещение + справочник + заказы WB + состояние');

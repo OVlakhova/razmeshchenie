@@ -4,7 +4,7 @@
 
 const API = window.RAZM_API ||
   'https://script.google.com/macros/s/AKfycbxzKklN_XquWi7e9ZKml2iGv7lnRI_gpab86hkXPs7SxT-FT3N4hD2cqfMTwvAksUxyPw/exec';
-const APP_VERSION = '1.9.3';
+const APP_VERSION = '2.0';
 const ORDERS_EVERY_MS = 3 * 60 * 1000;      // вкладка «Заказы» открыта — обновлять раз в 3 минуты
 const CATALOG_EVERY_MS = 10 * 60 * 1000;     // пока приложение открыто — обновлять справочник раз в 10 минут
 const CATALOG_STALE_MS = 30 * 60 * 1000;     // старше — кнопка «Справочник» жёлтая
@@ -83,7 +83,8 @@ const DB = {
 // ------------------------------------------------------------ состояние
 const S = {
   key: '', user: '', device: '',
-  mode: 'place',               // 'place' | 'find' | 'orders'
+  mode: 'place',               // 'place' | 'find' | 'orders' | 'photo'
+  states: {}, stLocal: {}, stEdit: null, photoLog: [],   // состояние книг: с сервера, свои свежие отметки, открытая книга, журнал фотостола
   orders: [], ordersAt: '', ordersErr: '', ordersLoading: false, picked: {},   // заказы WB (только чтение)
   cell: '',                    // активная ячейка
   catalog: {}, packages: [], catalogAt: '',
@@ -149,8 +150,9 @@ async function fetchCatalog() {
   try {
     const j = await api('GET', { action: 'catalog' });
     S.catalog = j.books || {}; S.packages = j.packages || []; S.catalogAt = j.version || new Date().toISOString();
+    S.states = j.states || {};
     await overlayQueue();
-    await DB.set('catalog', { books: S.catalog, packages: S.packages, at: S.catalogAt, table: S.table });
+    await DB.set('catalog', { books: S.catalog, packages: S.packages, at: S.catalogAt, table: S.table, states: S.states });
     netOk(); renderPackages(); renderTop(); renderOrders();
     return true;
   } catch (e) {
@@ -174,7 +176,7 @@ async function sync() {
         const ev = batch.find(e => e.id === r.id) || {};
         const title = ev.title || (S.catalog[ev.barcode] || {}).t || ev.barcode || '';
         if (ev.barcode && S.recent[ev.barcode]) delete S.recent[ev.barcode];
-        const what = ev.type === 'undo' ? 'отмена: ' : ev.fixOf ? 'упаковка: ' : '';
+        const what = ev.type === 'undo' ? 'отмена: ' : ev.fixOf ? 'упаковка: ' : ev.type === 'state' ? 'состояние: ' : '';
         S.problems.unshift(`${title} — ${what}${r.result.replace(/^ошибка: /, '')}`);
         S.problems = S.problems.slice(0, 10);
         if (ev.type !== 'undo') {
@@ -270,6 +272,7 @@ async function handleScan(code) {
   if (code.kind === 'desk') { await setMode('find'); return true; }
   if (S.mode === 'find') { code.kind === 'cell' ? showFindCell(code) : showFind(code); return true; }
   if (S.mode === 'orders') { orderScan(code); return true; }
+  if (S.mode === 'photo') return photoScan(code);
 
   if (code.kind === 'cell') {
     if (!await commitCurrent()) return false;
@@ -346,7 +349,9 @@ async function startCurrent(code, book, type, warn) {
   if (n > q) { lbl = `ЭКЗЕМПЛЯР ${n}, А В ТАБЛИЦЕ ${q}`; kind = 'warn'; }
   if (type === 'move') { lbl = 'ПЕРЕМЕЩЕНИЕ · ' + S.cell; kind = 'warn'; }
   beep(needsPkg || warn ? 'warn' : 'ok');
-  show(kind, lbl, '', book.t, meta, needsPkg ? 'Выберите упаковку' : warn);
+  const pre = stateOf(code.code);
+  show(kind, lbl, '', book.t, meta, needsPkg ? 'Выберите упаковку' : (warn || (isPlainState(pre) ? '' : 'С фотостола: ' + stateSummary(pre))));
+  await openState(code.code, book.t);
   renderPackages(); renderShelf();
 }
 
@@ -354,6 +359,7 @@ async function startCurrent(code, book, type, warn) {
 async function commitCurrent() {
   const c = S.current;
   if (!c) return true;
+  await flushState();
   if (c.needsPkg && !c.ev.pkg) {
     beep('bad');
     show('bad', 'ВЫБЕРИТЕ УПАКОВКУ', '', c.book.t, 'У этой книги нет габаритов в таблице', 'Следующий пик не принят');
@@ -506,6 +512,144 @@ function showFindCell(code) {
   const list = Object.entries(S.catalog).filter(([, b]) => (b.c || b.s['1c']) === code.cell);
   beep('ok');
   show('info', 'ЯЧЕЙКА ' + code.cell, `${list.length} книг`, '', list.slice(0, 6).map(([, b]) => b.t).join(' · '));
+}
+
+// ------------------------------------------------------------ состояние книги: формат, дефекты, особенности
+const ST = {
+  FORMATS: [['normal', 'Обычный'], ['reduced', 'Уменьшенный'], ['pocket', 'Карманный']],
+  DEFECTS: [['skew', 'Скос блока'], ['flood', 'Залив'], ['tear', 'Надрыв страницы'], ['notitle', 'Нет титульного листа'],
+            ['missing', 'Нет страниц'], ['stains', 'Пятна']],
+  FLOODS: [['flood_bottom', 'нижний край'], ['flood_top', 'верхний край'], ['flood_side', 'боковой край'], ['flood_part', 'частично']],
+  NOTES: [['marks', 'Надписи и пометки'], ['gift', 'Дарственная / автограф']],
+};
+const LABEL = Object.fromEntries([...ST.FORMATS, ...ST.DEFECTS, ...ST.NOTES,
+  ...ST.FLOODS.map(([k, v]) => [k, 'Залив — ' + v])].map(([k, v]) => [k, v.toLowerCase()]));
+const plainState = () => ({ f: 'normal', d: [], n: [], o: '' });
+const isPlainState = st => st.f === 'normal' && !st.d.length && !st.n.length && !st.o;
+const hasDefect = st => !!(st.d.length || st.o);
+function stateOf(bc) {
+  const loc = S.stLocal[bc];
+  const src = loc && Date.now() - loc.at < RECENT_MS ? loc.st : (S.states[bc] || (loc && loc.st));
+  return src ? JSON.parse(JSON.stringify(Object.assign(plainState(), src))) : plainState();
+}
+function stateSummary(st) {
+  const p = [];
+  if (st.f !== 'normal') p.push(LABEL[st.f] + ' формат');
+  st.d.forEach(k => p.push(LABEL[k])); if (st.o) p.push(st.o);
+  st.n.forEach(k => p.push(LABEL[k]));
+  return p.length ? p.join(', ') : 'обычный, без дефектов';
+}
+
+let stTimer = 0;
+/** Открыть отметки книги для правки (размещение или фотостол). Предыдущая открытая книга сохраняется. */
+async function openState(bc, title) {
+  await flushState();
+  const st = stateOf(bc);
+  S.stEdit = { bc, title, st, saved: JSON.stringify(st) };
+  $('otherDef').value = st.o || '';
+  renderState();
+}
+function editState(fn) {
+  if (!S.stEdit) return;
+  fn(S.stEdit.st);
+  S.lastActivity = Date.now();
+  renderState(); renderShelf();
+  clearTimeout(stTimer); stTimer = setTimeout(flushState, 1200);   // сохраняется само, через секунду после последнего касания
+}
+/** Отправить изменённые отметки. Неотправленную отметку той же книги заменяем, а не копим. */
+async function flushState() {
+  clearTimeout(stTimer);
+  const e = S.stEdit;
+  if (!e || JSON.stringify(e.st) === e.saved) return;
+  e.saved = JSON.stringify(e.st);
+  const st = JSON.parse(e.saved);
+  const q = await DB.qAll();
+  const pending = q.find(x => x.type === 'state' && x.barcode === e.bc);
+  if (pending) { pending.state = st; pending.ts = new Date().toISOString(); await DB.qPut(pending); }
+  else await enqueue({ id: uid(), ts: new Date().toISOString(), type: 'state', barcode: e.bc, state: st, title: e.title || '' });
+  S.stLocal[e.bc] = { st, at: Date.now() };
+  await DB.set('stLocal', S.stLocal);
+  if (S.mode === 'photo') {
+    S.photoLog = [{ bc: e.bc, title: e.title || '', sum: stateSummary(st), defect: hasDefect(st) }]
+      .concat(S.photoLog.filter(x => x.bc !== e.bc)).slice(0, 30);
+    await DB.set('photoLog', S.photoLog); renderPhoto();
+  }
+  renderState();
+}
+
+function chip(label, on, onclick, cls) {
+  const b = document.createElement('button'); b.type = 'button'; b.textContent = label;
+  b.className = 'chip' + (on ? ' on' : '') + (cls ? ' ' + cls : ''); b.onclick = onclick; return b;
+}
+function renderState() {
+  const show = !!S.stEdit && ((S.mode === 'place' && S.current && S.current.ev.barcode === S.stEdit.bc) || S.mode === 'photo');
+  $('stateBlock').classList.toggle('hidden', !show);
+  if (!show) return;
+  const st = S.stEdit.st;
+  const seg = $('fmtSeg'); seg.innerHTML = '';
+  ST.FORMATS.forEach(([k, l]) => seg.appendChild(chip(l, st.f === k, () => editState(s => { s.f = k; }), 'seg-b')));
+  const dc = $('defChips'); dc.innerHTML = '';
+  const flood = st.d.find(k => k.startsWith('flood'));
+  ST.DEFECTS.forEach(([k, l]) => {
+    const on = k === 'flood' ? !!flood : st.d.includes(k);
+    dc.appendChild(chip(k === 'flood' && flood && flood !== 'flood' ? 'Залив — ' + LABEL[flood].replace('залив — ', '') : l, on, () => editState(s => {
+      if (k === 'flood') s.d = flood ? s.d.filter(x => !x.startsWith('flood')) : s.d.concat('flood');
+      else s.d = s.d.includes(k) ? s.d.filter(x => x !== k) : s.d.concat(k);
+    }), 'bad'));
+  });
+  dc.appendChild(chip('Другое…', !!st.o || $('otherDef').dataset.open === '1', () => {
+    const open = $('otherDef').dataset.open !== '1' && !st.o;
+    $('otherDef').dataset.open = open ? '1' : '';
+    if (!open) { $('otherDef').value = ''; editState(s => { s.o = ''; }); }
+    renderState();
+    if (open) $('otherDef').focus();
+  }, 'bad'));
+  const fc = $('floodChips'); fc.innerHTML = '';
+  fc.classList.toggle('hidden', !flood);
+  ST.FLOODS.forEach(([k, l]) => fc.appendChild(chip(l, flood === k, () => editState(s => {
+    s.d = s.d.filter(x => !x.startsWith('flood')).concat(flood === k ? 'flood' : k);
+  }), 'bad small')));
+  $('otherDef').classList.toggle('hidden', !(st.o || $('otherDef').dataset.open === '1'));
+  const nc = $('noteChips'); nc.innerHTML = '';
+  ST.NOTES.forEach(([k, l]) => nc.appendChild(chip(l, st.n.includes(k), () => editState(s => {
+    s.n = s.n.includes(k) ? s.n.filter(x => x !== k) : s.n.concat(k);
+  }))));
+  const saved = JSON.stringify(st) === S.stEdit.saved;
+  $('stSummary').textContent = (hasDefect(st) ? 'ДЕФЕКТ: ' : '') + stateSummary(st) + (saved ? '' : ' · сохраняю…');
+  $('stSummary').classList.toggle('defect', hasDefect(st));
+}
+
+// ------------------------------------------------------------ «Фотостол»: отметить состояние до описания
+async function photoScan(code) {
+  if (code.kind === 'cell') { beep('warn'); show('warn', 'ЭТО ЯЧЕЙКА', '', 'На фотостоле пикайте наклейку книги', ''); return false; }
+  if (code.kind !== 'book') return false;
+  if (code.code.length === 13 && !code.checksumOk) {
+    beep('bad');
+    show('bad', 'НАКЛЕЙКА НЕ СЧИТАЛАСЬ', '', code.code, 'Контрольная цифра не сходится — пикните ещё раз.', 'Отметка не сохранена');
+    return false;
+  }
+  const b = S.catalog[code.code];
+  const prev = S.stLocal[code.code] || S.states[code.code];
+  await openState(code.code, b ? b.t : '');
+  beep('ok');
+  show(b && b.n ? 'info' : 'ok', prev ? 'УЖЕ ОТМЕЧЕНА — ПРАВКА' : 'КНИГА · ' + code.code, '', b ? b.t : 'Новая книга (ещё не описана)',
+       b ? (b.n ? 'Уже есть в таблице' : 'Есть в архиве / 1С') : 'Отметки подтянутся при описании и размещении',
+       'Отметьте формат и дефекты — сохранится само.');
+  return true;
+}
+function renderPhoto() {
+  $('photoView').classList.toggle('hidden', S.mode !== 'photo');
+  if (S.mode !== 'photo') return;
+  const today = S.photoLog.length;
+  $('photoHead').textContent = today ? `Отмечено: ${today}` : 'Пикните наклейку книги';
+  const box = $('photoList'); box.innerHTML = '';
+  S.photoLog.slice(0, 10).forEach(x => {
+    const row = document.createElement('div'); row.className = 'row' + (x.defect ? ' bad' : '');
+    const d = document.createElement('div');
+    const b = document.createElement('b'); b.textContent = x.title || x.bc;
+    const s = document.createElement('span'); s.textContent = (x.title ? x.bc + ' · ' : '') + (x.defect ? 'ДЕФЕКТ: ' : '') + x.sum;
+    d.append(b, s); row.append(d); box.appendChild(row);
+  });
 }
 
 // ------------------------------------------------------------ «Заказы» WB: что собрать и в каком порядке
@@ -719,6 +863,7 @@ function renderShelf() {
     const s = document.createElement('span');
     const p = S.current.ev.pkg || S.current.fromTable;
     s.textContent = 'на экране — запишется следующим пиком' + (p ? ' · ' + pkgLabel(p) : ' · выберите упаковку');
+    if (S.stEdit && S.stEdit.bc === S.current.ev.barcode && !isPlainState(S.stEdit.st)) s.textContent += ' · ' + stateSummary(S.stEdit.st);
     d.append(b, s); row.append(d); box.appendChild(row);
   }
   S.shelf.slice(0, 8).forEach(it => {
@@ -726,6 +871,8 @@ function renderShelf() {
     const d = document.createElement('div');
     const b = document.createElement('b'); b.textContent = it.title;
     const s = document.createElement('span'); s.textContent = pkgLabel(it.pkg) || 'габариты из таблицы';
+    const sti = stateOf(it.barcode);
+    if (!isPlainState(sti)) s.textContent += ' · ' + (hasDefect(sti) ? 'ДЕФЕКТ: ' : '') + stateSummary(sti);
     const rj = S.rejected[it.id];
     if (rj) { row.className = 'row bad'; s.textContent = (rj.pickOk ? '' : 'НЕ ПРИНЯТА: ') + rj.why; }
     d.append(b, s);
@@ -748,15 +895,19 @@ function render() {
   $('modePlace').classList.toggle('on', S.mode === 'place');
   $('modeFind').classList.toggle('on', S.mode === 'find');
   $('modeOrders').classList.toggle('on', S.mode === 'orders');
+  $('modePhoto').classList.toggle('on', S.mode === 'photo');
   $('shelf').classList.toggle('hidden', S.mode !== 'place');
   $('undoBtn').classList.toggle('hidden', S.mode !== 'place');
-  renderTop(); renderPackages(); renderShelf(); renderProblems(); renderOrders();
+  renderTop(); renderPackages(); renderShelf(); renderProblems(); renderOrders(); renderPhoto(); renderState();
 }
 
 async function setMode(m) {
   if (m === S.mode) return;
   if (m !== 'place' && !await commitCurrent()) return;
+  await flushState();
+  S.stEdit = null; $('otherDef').dataset.open = '';
   S.mode = m; hideActions(); render();
+  if (m === 'photo') { show('info', 'ФОТОСТОЛ', '', 'Пикните наклейку книги', 'Отметьте формат и дефекты, которые не видно на фото. Сохраняется само, в таблицу «Место хранения» ничего не пишется.'); return; }
   if (m === 'orders') { show('info', 'ЗАКАЗЫ WB', '', 'Новые заказы по стеллажам и полкам', 'Пикните книгу — покажу, есть ли она в заказе. Ничего не меняется ни в WB, ни в таблице.'); loadOrders(true); return; }
   if (m === 'find') show('info', 'ГДЕ КНИГА?', '', 'Пикните книгу', 'Покажу её место. Ничего не записывается.');
   else show('info', 'РАЗМЕЩЕНИЕ', '', S.cell ? 'Ячейка ' + S.cell : 'Пикните этикетку ячейки', '');
@@ -867,6 +1018,7 @@ function closeCamera() {
 
 // поле сканера всегда в фокусе
 function focusScan() {
+  if (document.activeElement && document.activeElement.id === 'otherDef') return;   // пишут «другой дефект»
   if (!$('manualSheet').classList.contains('hidden') || !$('menuSheet').classList.contains('hidden') || !$('camSheet').classList.contains('hidden')) return;
   if (!$('mainView').classList.contains('hidden')) $('scan').focus({ preventScroll: true });
 }
@@ -885,7 +1037,9 @@ async function start() {
   const ord = await DB.get('orders');
   if (ord) { S.orders = ord.orders || []; S.ordersAt = ord.at || ''; S.picked = ord.picked || {}; }
   const cat = await DB.get('catalog');
-  if (cat) { S.catalog = cat.books || {}; S.packages = cat.packages || []; S.catalogAt = cat.at || ''; S.table = cat.table || ''; await overlayQueue(); }
+  if (cat) { S.catalog = cat.books || {}; S.packages = cat.packages || []; S.catalogAt = cat.at || ''; S.table = cat.table || ''; S.states = cat.states || {}; await overlayQueue(); }
+  S.stLocal = await DB.get('stLocal') || {};
+  S.photoLog = await DB.get('photoLog') || [];
   const sess = await DB.get('session');
   if (sess) {
     S.cell = sess.cell || ''; S.lastPkg = sess.lastPkg || null; S.lastActivity = sess.lastActivity || 0;
@@ -938,6 +1092,7 @@ function bind() {
   });
   scan.addEventListener('blur', () => setTimeout(focusScan, 150));
   document.addEventListener('click', () => setTimeout(focusScan, 50));
+  document.addEventListener('visibilitychange', () => { if (document.hidden) flushState(); });
   document.addEventListener('visibilitychange', () => { if (!document.hidden) { focusScan(); autoClose().then(sync); loadCatalog(false, 60 * 1000); if (S.mode === 'orders') loadOrders(false); } });
   window.addEventListener('online', () => { S.online = true; sync(); loadCatalog(false); });
   window.addEventListener('offline', () => { S.online = false; renderTop(); });
@@ -945,6 +1100,17 @@ function bind() {
   $('modePlace').onclick = () => setMode('place');
   $('modeFind').onclick = () => setMode('find');
   $('modeOrders').onclick = () => setMode('orders');
+  $('modePhoto').onclick = () => setMode('photo');
+  const od = $('otherDef');
+  od.addEventListener('input', () => editState(s => { s.o = od.value.trim(); }));
+  od.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    const m = /(\d{9,13})$/.exec(od.value);              // сканер «впечатал» код в поле — это пик, а не текст
+    if (m) { od.value = od.value.slice(0, -m[1].length); editState(s => { s.o = od.value.trim(); }); od.blur(); onScan(m[1]); return; }
+    od.blur(); focusScan();
+  });
+  od.addEventListener('blur', () => setTimeout(focusScan, 150));
   $('ordersRefresh').onclick = () => loadOrders(true);
   $('undoBtn').onclick = undo;
   $('doneBtn').onclick = () => { S.lastActivity = Date.now(); shelfDone(); };
