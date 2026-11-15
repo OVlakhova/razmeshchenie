@@ -123,11 +123,15 @@ button{font-family:inherit;color:inherit}
 .setup input{height:56px;border:2px solid #d4d4cf;border-radius:12px;padding:0 14px;font-size:16px}
 .problems{margin:8px 12px 0;padding:10px 14px;background:var(--bad-bg);border-radius:14px;font-size:14px;color:var(--bad-ink)}
 #scan{position:fixed;left:-1000px;top:0;width:10px;height:10px;opacity:0}
+.st-compact{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 12px;padding:10px 14px;border-radius:12px;background:#fff;font-size:15px;font-weight:600;color:#3f3f46}
+.st-compact.defect{background:var(--bad-bg);color:var(--bad-ink)}
+.st-compact button{flex:none;height:40px;padding:0 14px;border:1px solid #d4d4cf;border-radius:10px;background:#fff;font-size:15px;font-weight:600}
+.book-done{display:block;width:calc(100% - 24px);margin:12px 12px 0;height:60px;border:0;border-radius:14px;background:var(--ok);color:#fff;font-size:18px;font-weight:800}
 /* старые iPhone (iOS 12–14): у flex нет gap — те же отступы маржинами */
 @supports not (aspect-ratio: 1 / 1) {
   .modes > * + *, .seg > * + *, .row2 > * + *, .bottom > * + *, .cellside > * + *, .top > * + *, .infobar > * + * { margin-left: 6px; }
   .chips > * { margin: 0 8px 8px 0; }
-  .ord > * + *, .shelf .row > * + * { margin-left: 10px; }
+  .ord > * + *, .shelf .row > * + *, .st-compact > * + * { margin-left: 10px; }
   .actions > * + *, .menu > * + *, .cam .bar > * + * { margin-top: 10px; }
 }
 .cam .manual{display:flex;gap:8px}
@@ -188,6 +192,8 @@ button{font-family:inherit;color:inherit}
     </div>
     <div id="stateBlock" class="state hidden">
       <div class="sec"><b>Состояние</b><span>не видно на фото — отметьте</span></div>
+      <div id="stCompact" class="st-compact hidden"><span id="stCompactText"></span><button id="stEditBtn" type="button">Изменить</button></div>
+      <div id="stFull">
       <div class="seg" id="fmtSeg"></div>
       <div class="sublbl">Дефекты</div>
       <div class="chips" id="defChips"></div>
@@ -196,7 +202,9 @@ button{font-family:inherit;color:inherit}
       <div class="sublbl">Особенности (не дефект)</div>
       <div class="chips" id="noteChips"></div>
       <div class="st-sum" id="stSummary"></div>
+      </div>
     </div>
+    <button id="bookDone" class="book-done hidden" type="button">Готово</button>
     <div id="photoView" class="shelf hidden">
       <div class="ord-top" style="padding:10px 0 4px"><span id="photoHead">Пикните наклейку книги</span></div>
       <div id="photoList"></div>

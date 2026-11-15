@@ -12,7 +12,7 @@
  */
 
 // ---------------------------------------------------------------- настройки
-var SCRIPT_VERSION = '2.1';   // видно в приложении: Меню -> «скрипт …»
+var SCRIPT_VERSION = '2.2';   // видно в приложении: Меню -> «скрипт …»
 // Какую таблицу открывать. Адрес таблицы: docs.google.com/spreadsheets/d/<ВОТ ЭТО>/edit
 var SPREADSHEET_ID = '1AW5En8QFA7IRrn9FBgCT-TJU_8Qapbmqs4iojxsCsHE';   // ТЕСТ OzonBooks
 
@@ -35,7 +35,7 @@ var CFG = {
     { name: 'Развертка - 9 см.', L: 22, W: 15, H: 9 }, { name: 'Развертка - 10 см.', L: 22, W: 15, H: 10 },
     { name: 'Ручная', manual: true }
   ],
-  USERS: ['Ольга', 'Влада'],
+  USERS: ['Ольга', 'Влада', 'Айфон'],      // новое имя -> setup() выдаст ему ключ, старые ключи не меняются
   // столбцы ищутся по заголовку, не по букве
   COL: {
     barcode: 'НАШ ШТРИХКОД', cell: 'Место хранения', qty: 'Количество',
@@ -386,11 +386,10 @@ function setup() {
     e.getRange(1, 1, 1, 6).setValues([['получено', 'кто', 'id события', 'штрихкод', 'ячейка', 'причина']]).setFontWeight('bold');
     e.setFrozenRows(1);
   }
-  var keys = users_();
-  if (!Object.keys(keys).length) {
-    CFG.USERS.forEach(function (name) { keys[Utilities.getUuid()] = name; });
-    PropertiesService.getScriptProperties().setProperty('DEVICE_KEYS', JSON.stringify(keys));
-  }
+  var keys = users_(), have = {}, added = false;
+  for (var kk in keys) have[keys[kk]] = true;
+  CFG.USERS.forEach(function (name) { if (!have[name]) { keys[Utilities.getUuid()] = name; added = true; } });
+  if (added) PropertiesService.getScriptProperties().setProperty('DEVICE_KEYS', JSON.stringify(keys));
   Logger.log('Ключи устройств (вставить в приложение на телефоне):');
   for (var k in keys) Logger.log(keys[k] + ': ' + k);
 }

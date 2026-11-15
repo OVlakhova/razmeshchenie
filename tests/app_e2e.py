@@ -374,6 +374,19 @@ with sync_playwright() as p:
     check(len(sts) == 1 and sts[0]['barcode'] == NEWBC and sts[0]['state'] == {'f': 'pocket', 'd': ['skew', 'flood_bottom'], 'n': ['marks', 'autograph'], 'o': ''},
           'отметки ушли одним событием: ' + str([e.get('state') for e in sts]))
     check('ДЕФЕКТ' in page.inner_text('#photoList'), 'в списке фотостола видно, что отмечено')
+    check(page.is_visible('#bookDone') and 'сохранить' in page.inner_text('#bookDone'), 'на фотостоле есть «Готово — сохранить отметки»')
+    # «Готово» без изменений — тоже результат: «проверено, обычная»
+    NEWBC2 = ean('200000077701')
+    page.wait_for_timeout(1600)
+    scan(NEWBC2); page.wait_for_timeout(300)
+    check('сохранена без «Готово»' in st(), 'забыли «Готово» — предупреждение, что предыдущая сохранена: ' + st().replace('\n', ' | '))
+    page.click('#bookDone'); page.wait_for_timeout(300)
+    check('СОХРАНЕНО' in st() and not page.is_visible('#stateBlock'), '«Готово» закрывает книгу')
+    page.wait_for_timeout(6000)
+    st2 = [e for e in posted if e.get('type') == 'state' and e['barcode'] == NEWBC2]
+    check(len(st2) == 1 and st2[0]['state'] == {'f': 'normal', 'd': [], 'n': [], 'o': ''}, '«обычная, без дефектов» тоже записана: ' + str(st2))
+    page.wait_for_timeout(1600)
+    scan(NEWBC); page.wait_for_timeout(300)
     # другой дефект + сканер, «впечатавший» код в поле
     page.locator('#defChips .chip', has_text='Другое').click(); page.wait_for_timeout(100)
     page.fill('#otherDef', 'надорван форзац')
@@ -393,11 +406,18 @@ with sync_playwright() as p:
     page.click('#catBtn'); page.wait_for_timeout(800)
     scan('991019005'); page.wait_for_timeout(1600)
     scan(NEWBC); page.wait_for_timeout(400)
-    check(page.is_visible('#stateBlock') and page.locator('#fmtSeg .chip.on').inner_text() == 'Карманный' and 'С фотостола' in st(),
-          'при размещении отметки с фотостола уже выбраны: ' + st().replace('\n', ' | '))
+    check(page.is_visible('#stCompact') and not page.is_visible('#stFull') and 'карманный' in page.inner_text('#stCompact') and 'С фотостола' in st(),
+          'у полки отметки с фотостола показаны коротко: ' + page.inner_text('#stateBlock').replace('\n', ' | '))
+    check(page.is_visible('#bookDone') and 'записать книгу' in page.inner_text('#bookDone'), 'у полки есть «Готово — записать книгу»')
+    page.click('#stEditBtn'); page.wait_for_timeout(150)
+    check(page.is_visible('#stFull') and page.locator('#fmtSeg .chip.on').inner_text() == 'Карманный', '«Изменить» раскрывает отметки')
     page.locator('#defChips .chip', has_text='Пятна').click(); page.wait_for_timeout(200)
     page.screenshot(path='/tmp/razm_place_state.png', full_page=True)
-    page.click('#doneBtn'); page.wait_for_timeout(2500)
+    n_before = len(posted)
+    page.click('#bookDone'); page.wait_for_timeout(2500)
+    check('ЗАПИСАНА · С19-П5' in st() and not page.is_visible('#bookDone'), '«Готово» у полки записало книгу сразу: ' + st().replace('\n', ' | '))
+    check(any(e.get('type') == 'place' and e.get('barcode') == NEWBC for e in posted[n_before:]), 'пик ушёл без следующего пика')
+    page.click('#doneBtn'); page.wait_for_timeout(1500)
     last = [e for e in posted if e.get('type') == 'state' and e['barcode'] == NEWBC][-1]
     check('stains' in last['state']['d'] and last['state']['f'] == 'pocket', 'правка у полки ушла: ' + str(last['state']))
     check(any(e.get('type') == 'place' and e.get('barcode') == NEWBC for e in posted), 'книга размещена')

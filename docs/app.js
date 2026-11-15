@@ -4,7 +4,7 @@
 
 const API = window.RAZM_API ||
   'https://script.google.com/macros/s/AKfycbxzKklN_XquWi7e9ZKml2iGv7lnRI_gpab86hkXPs7SxT-FT3N4hD2cqfMTwvAksUxyPw/exec';
-const APP_VERSION = '2.1';
+const APP_VERSION = '2.2';
 const ORDERS_EVERY_MS = 3 * 60 * 1000;      // вкладка «Заказы» открыта — обновлять раз в 3 минуты
 const CATALOG_EVERY_MS = 10 * 60 * 1000;     // пока приложение открыто — обновлять справочник раз в 10 минут
 const CATALOG_STALE_MS = 30 * 60 * 1000;     // старше — кнопка «Справочник» жёлтая
@@ -545,7 +545,9 @@ let stTimer = 0;
 async function openState(bc, title) {
   await flushState();
   const st = stateOf(bc);
-  S.stEdit = { bc, title, st, saved: JSON.stringify(st) };
+  const recorded = !!(S.stLocal[bc] || S.states[bc]);
+  // у полки отметки обычно уже сделаны на фотостоле — показываем их коротко, правка по кнопке
+  S.stEdit = { bc, title, st, saved: JSON.stringify(st), recorded, compact: S.mode === 'place' && recorded };
   $('otherDef').value = st.o || '';
   renderState();
 }
@@ -557,10 +559,17 @@ function editState(fn) {
   clearTimeout(stTimer); stTimer = setTimeout(flushState, 1200);   // сохраняется само, через секунду после последнего касания
 }
 /** Отправить изменённые отметки. Неотправленную отметку той же книги заменяем, а не копим. */
-async function flushState() {
+/** force — записать даже без изменений (кнопка «Готово»: «проверено, обычная, без дефектов» — тоже результат). */
+async function flushState(force) {
   clearTimeout(stTimer);
   const e = S.stEdit;
-  if (!e || JSON.stringify(e.st) === e.saved) return;
+  if (!e) return;
+  const same = JSON.stringify(e.st) === e.saved;
+  if (same && !(force && !e.recorded)) {
+    if (force && S.mode === 'photo') logPhoto(e, e.st);
+    return;
+  }
+  e.recorded = true;
   e.saved = JSON.stringify(e.st);
   const st = JSON.parse(e.saved);
   const q = await DB.qAll();
@@ -569,12 +578,45 @@ async function flushState() {
   else await enqueue({ id: uid(), ts: new Date().toISOString(), type: 'state', barcode: e.bc, state: st, title: e.title || '' });
   S.stLocal[e.bc] = { st, at: Date.now() };
   await DB.set('stLocal', S.stLocal);
-  if (S.mode === 'photo') {
-    S.photoLog = [{ bc: e.bc, title: e.title || '', sum: stateSummary(st), defect: hasDefect(st) }]
-      .concat(S.photoLog.filter(x => x.bc !== e.bc)).slice(0, 30);
-    await DB.set('photoLog', S.photoLog); renderPhoto();
-  }
+  if (S.mode === 'photo') logPhoto(e, st);
   renderState();
+}
+function logPhoto(e, st) {
+  S.photoLog = [{ bc: e.bc, title: e.title || '', sum: stateSummary(st), defect: hasDefect(st) }]
+    .concat(S.photoLog.filter(x => x.bc !== e.bc)).slice(0, 30);
+  DB.set('photoLog', S.photoLog); renderPhoto();
+}
+
+/** «Готово»: сразу записать книгу и закрыть её. Фотостол — отметки; размещение — пик в ячейку вместе с отметками. */
+async function bookDone() {
+  S.lastActivity = Date.now();
+  if (S.mode === 'photo') {
+    const e = S.stEdit; if (!e) return;
+    await flushState(true);
+    S.stEdit = null; $('otherDef').dataset.open = '';
+    renderState();
+    beep('ok');
+    return show(hasDefect(e.st) ? 'warn' : 'ok', 'СОХРАНЕНО', '', e.title || 'Книга ' + e.bc,
+                (hasDefect(e.st) ? 'ДЕФЕКТ: ' : '') + stateSummary(e.st), 'Пикните наклейку следующей книги');
+  }
+  if (S.mode === 'place' && S.current) {
+    const c = S.current, e = S.stEdit && S.stEdit.bc === c.ev.barcode ? S.stEdit : null;
+    if (c.needsPkg && !c.ev.pkg) return commitCurrent();          // покажет «выберите упаковку»
+    if (e) await flushState(true);
+    if (!await commitCurrent()) return;
+    S.stEdit = null; $('otherDef').dataset.open = '';
+    renderState(); renderPackages();
+    beep('ok');
+    show('ok', 'ЗАПИСАНА · ' + c.ev.cell, '', c.book.t, e && !isPlainState(e.st) ? (hasDefect(e.st) ? 'ДЕФЕКТ: ' : '') + stateSummary(e.st) : '',
+         'Пикните следующую книгу');
+    sync();
+  }
+}
+function renderDone() {
+  const b = $('bookDone'); if (!b) return;
+  const on = (S.mode === 'place' && !!S.current) || (S.mode === 'photo' && !!S.stEdit);
+  b.classList.toggle('hidden', !on);
+  b.textContent = S.mode === 'photo' ? 'Готово — сохранить отметки' : 'Готово — записать книгу';
 }
 
 function chip(label, on, onclick, cls) {
@@ -582,10 +624,15 @@ function chip(label, on, onclick, cls) {
   b.className = 'chip' + (on ? ' on' : '') + (cls ? ' ' + cls : ''); b.onclick = onclick; return b;
 }
 function renderState() {
+  renderDone();
   const show = !!S.stEdit && ((S.mode === 'place' && S.current && S.current.ev.barcode === S.stEdit.bc) || S.mode === 'photo');
   $('stateBlock').classList.toggle('hidden', !show);
   if (!show) return;
   const st = S.stEdit.st;
+  $('stCompact').classList.toggle('hidden', !S.stEdit.compact);
+  $('stFull').classList.toggle('hidden', !!S.stEdit.compact);
+  $('stCompactText').textContent = (hasDefect(st) ? 'ДЕФЕКТ: ' : '') + stateSummary(st);
+  $('stCompact').classList.toggle('defect', hasDefect(st));
   const seg = $('fmtSeg'); seg.innerHTML = '';
   ST.FORMATS.forEach(([k, l]) => seg.appendChild(chip(l, st.f === k, () => editState(s => { s.f = k; }), 'seg-b')));
   const dc = $('defChips'); dc.innerHTML = '';
@@ -630,11 +677,13 @@ async function photoScan(code) {
   }
   const b = S.catalog[code.code];
   const prev = S.stLocal[code.code] || S.states[code.code];
+  const was = S.stEdit && S.stEdit.bc !== code.code ? (S.stEdit.title || S.stEdit.bc) : '';
+  if (was) await flushState(true);                                    // забыли «Готово» — предыдущую всё равно сохраняем
   await openState(code.code, b ? b.t : '');
-  beep('ok');
+  beep(was ? 'warn' : 'ok');
   show(b && b.n ? 'info' : 'ok', prev ? 'УЖЕ ОТМЕЧЕНА — ПРАВКА' : 'КНИГА · ' + code.code, '', b ? b.t : 'Новая книга (ещё не описана)',
        b ? (b.n ? 'Уже есть в таблице' : 'Есть в архиве / 1С') : 'Отметки подтянутся при описании и размещении',
-       'Отметьте формат и дефекты — сохранится само.');
+       was ? `Предыдущая («${was}») сохранена без «Готово».` : 'Отметьте формат и дефекты, затем «Готово».');
   return true;
 }
 function renderPhoto() {
@@ -850,10 +899,11 @@ function renderPackages() {
   $('pkgManual').classList.toggle('sel', !!(sel && sel.name === 'Ручная'));
   $('pkgManual').textContent = sel && sel.name === 'Ручная' ? `Ручная ${sel.L}×${sel.W}×${sel.H} — изменить` : 'Ручная — ввести размеры';
   $('pkgHint').textContent = cur ? (cur.ev.pkg ? (cur.needsPkg ? '' : 'выбрана') : cur.fromTable ? 'из таблицы' : 'не выбрана') : 'исправление';
-  $('pkgInfo').textContent = sel ? `${pkgLabel(sel)} · ${sel.L} × ${sel.W} × ${sel.H} см. Пикните следующую книгу — упаковка подтвердится сама.` : 'У книги нет габаритов в таблице — выберите упаковку.';
+  $('pkgInfo').textContent = sel ? `${pkgLabel(sel)} · ${sel.L} × ${sel.W} × ${sel.H} см. Подтвердится кнопкой «Готово».` : 'У книги нет габаритов в таблице — выберите упаковку.';
 }
 
 function renderShelf() {
+  renderDone();
   $('shelfCount').textContent = S.shelf.length + (S.current ? 1 : 0);
   const box = $('shelf'); box.innerHTML = '';
   if (S.current) {                 // открытая книга: ещё не записана, запишется следующим пиком
@@ -862,7 +912,7 @@ function renderShelf() {
     const b = document.createElement('b'); b.textContent = S.current.book.t;
     const s = document.createElement('span');
     const p = S.current.ev.pkg || S.current.fromTable;
-    s.textContent = 'на экране — запишется следующим пиком' + (p ? ' · ' + pkgLabel(p) : ' · выберите упаковку');
+    s.textContent = 'на экране — нажмите «Готово»' + (p ? ' · ' + pkgLabel(p) : ' · выберите упаковку');
     if (S.stEdit && S.stEdit.bc === S.current.ev.barcode && !isPlainState(S.stEdit.st)) s.textContent += ' · ' + stateSummary(S.stEdit.st);
     d.append(b, s); row.append(d); box.appendChild(row);
   }
@@ -1104,6 +1154,8 @@ function bind() {
   $('modeFind').onclick = () => setMode('find');
   $('modeOrders').onclick = () => setMode('orders');
   $('modePhoto').onclick = () => setMode('photo');
+  $('bookDone').onclick = bookDone;
+  $('stEditBtn').onclick = () => { if (S.stEdit) { S.stEdit.compact = false; renderState(); } };
   const od = $('otherDef');
   od.addEventListener('input', () => editState(s => { s.o = od.value.trim(); }));
   od.addEventListener('keydown', e => {

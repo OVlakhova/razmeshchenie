@@ -110,6 +110,17 @@ vm.runInContext('setup()', ctx);
 const keys = JSON.parse(props.DEVICE_KEYS);
 const olgaKey = Object.keys(keys).find(k => keys[k] === 'Ольга');
 assert.ok(olgaKey);
+assert.deepStrictEqual(Object.values(keys).sort(), ['Айфон', 'Влада', 'Ольга'], 'три ключа: Ольга, Влада, Айфон');
+// новый пользователь добавляется, старые ключи не меняются
+const two = Object.fromEntries(Object.entries(keys).filter(([, n]) => n !== 'Айфон'));
+props.DEVICE_KEYS = JSON.stringify(two);
+vm.runInContext('setup()', ctx);
+const keys2 = JSON.parse(props.DEVICE_KEYS);
+assert.strictEqual(Object.keys(keys2).length, 3);
+for (const k of Object.keys(two)) assert.strictEqual(keys2[k], two[k], 'старый ключ на месте: ' + two[k]);
+vm.runInContext('setup()', ctx);
+assert.strictEqual(Object.keys(JSON.parse(props.DEVICE_KEYS)).length, 3, 'повторный setup ключей не плодит');
+Object.assign(keys, keys2);
 const hm = {}; books.rows[0].forEach((h, i) => { hm[h] = i; });
 ['Артикул', 'Упаковка', 'Размещено', 'Размещено кем'].forEach(h => assert.ok(h in hm, 'создан столбец ' + h));
 
