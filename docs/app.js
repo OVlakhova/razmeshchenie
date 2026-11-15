@@ -4,7 +4,7 @@
 
 const API = window.RAZM_API ||
   'https://script.google.com/macros/s/AKfycbxzKklN_XquWi7e9ZKml2iGv7lnRI_gpab86hkXPs7SxT-FT3N4hD2cqfMTwvAksUxyPw/exec';
-const APP_VERSION = '2.0.1';
+const APP_VERSION = '2.1';
 const ORDERS_EVERY_MS = 3 * 60 * 1000;      // вкладка «Заказы» открыта — обновлять раз в 3 минуты
 const CATALOG_EVERY_MS = 10 * 60 * 1000;     // пока приложение открыто — обновлять справочник раз в 10 минут
 const CATALOG_STALE_MS = 30 * 60 * 1000;     // старше — кнопка «Справочник» жёлтая
@@ -520,7 +520,7 @@ const ST = {
   DEFECTS: [['skew', 'Скос блока'], ['flood', 'Залив'], ['tear', 'Надрыв страницы'], ['notitle', 'Нет титульного листа'],
             ['missing', 'Нет страниц'], ['stains', 'Пятна']],
   FLOODS: [['flood_bottom', 'нижний край'], ['flood_top', 'верхний край'], ['flood_side', 'боковой край'], ['flood_part', 'частично']],
-  NOTES: [['marks', 'Надписи и пометки'], ['gift', 'Дарственная / автограф']],
+  NOTES: [['gift', 'Дарственная надпись'], ['autograph', 'Автограф автора'], ['marks', 'Подчёркивания и пометки в тексте']],
 };
 const LABEL = {};               // без Object.fromEntries — его нет в Safari старых iPhone
 [...ST.FORMATS, ...ST.DEFECTS, ...ST.NOTES, ...ST.FLOODS.map(([k, v]) => [k, 'Залив — ' + v])].forEach(([k, v]) => { LABEL[k] = v.toLowerCase(); });

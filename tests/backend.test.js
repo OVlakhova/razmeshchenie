@@ -250,7 +250,7 @@ assert.deepStrictEqual(rs.results.map(x => x.result.slice(0, 20)), ['ok', 'ok', 
 const stSh = sheets['Состояние'];
 assert.ok(stSh, 'лист «Состояние» создан сам');
 assert.deepStrictEqual(stSh.rows[0], ['штрихкод', 'формат', 'дефекты', 'особенности', 'другой дефект', 'кто', 'когда', 'id события']);
-assert.deepStrictEqual(stSh.rows[1].slice(0, 6), ['2000000777001', 'карманный', 'скос блока; залив — нижний край', 'надписи и пометки', '', 'Ольга']);
+assert.deepStrictEqual(stSh.rows[1].slice(0, 6), ['2000000777001', 'карманный', 'скос блока; залив — нижний край', 'подчёркивания и пометки в тексте', '', 'Ольга']);
 assert.deepStrictEqual(stSh.rows[2].slice(0, 5), ['2000000777002', 'уменьшенный', '', '', 'надорван форзац']);
 // повторная отметка той же книги — правка строки, а не вторая строка; два залива -> один
 rs = postAs(vladaKey, [{ id: 'st5', ts: '2026-11-13T11:00:00Z', type: 'state', barcode: '2000000777001', state: { f: 'normal', d: ['flood_top', 'flood_side', 'tear'], n: [], o: '' } }]);
@@ -264,6 +264,14 @@ assert.strictEqual(sheets['Журнал размещения'].rows[0][23], 'с�
 const catS = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'catalog' } }).text);
 assert.deepStrictEqual(catS.states['2000000777001'], { f: 'normal', d: ['flood_top', 'tear'], n: [], o: '' });
 assert.deepStrictEqual(catS.states['2000000777002'], { f: 'reduced', d: [], n: [], o: 'надорван форзац' });
+// три особенности; старые подписи на листе читаются
+rs = post([{ id: 'st6', ts: '2026-11-15T10:00:00Z', type: 'state', barcode: '2000000777004', state: { f: 'normal', d: [], n: ['gift', 'autograph', 'marks'], o: '' } }]);
+assert.strictEqual(rs.results[0].result, 'ok');
+assert.strictEqual(stSh.rows[stSh.rows.length - 1][3], 'дарственная надпись; автограф автора; подчёркивания и пометки в тексте');
+stSh.rows.push(['2000000777005', 'обычный', '', 'надписи и пометки; дарственная надпись / автограф', '', 'Ольга', '', 'old']);
+const catOld = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'catalog' } }).text);
+assert.deepStrictEqual(catOld.states['2000000777005'].n.sort(), ['gift', 'marks']);
+assert.deepStrictEqual(catOld.states['2000000777004'].n, ['gift', 'autograph', 'marks']);
 // повторная отправка — не задваивается
 rs = post([{ id: 'st1', ts: '2026-11-13T10:00:00Z', type: 'state', barcode: '2000000777001', state: { f: 'pocket' } }]);
 assert.strictEqual(rs.results[0].result, 'уже получено');

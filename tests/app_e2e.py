@@ -365,12 +365,13 @@ with sync_playwright() as p:
     page.locator('#defChips .chip', has_text='Залив').click()
     check(page.is_visible('#floodChips'), 'у залива появились уточнения')
     page.locator('#floodChips .chip', has_text='нижний край').click()
-    page.locator('#noteChips .chip', has_text='Надписи и пометки').click()
+    page.locator('#noteChips .chip', has_text='Подчёркивания и пометки').click()
+    page.locator('#noteChips .chip', has_text='Автограф автора').click()
     check('ДЕФЕКТ' in page.inner_text('#stSummary') and 'карманный' in page.inner_text('#stSummary'), 'итог: ' + page.inner_text('#stSummary'))
     page.screenshot(path='/tmp/razm_photo.png', full_page=True)
     page.wait_for_timeout(1500 + 5500)
     sts = [e for e in posted[n0:] if e.get('type') == 'state']
-    check(len(sts) == 1 and sts[0]['barcode'] == NEWBC and sts[0]['state'] == {'f': 'pocket', 'd': ['skew', 'flood_bottom'], 'n': ['marks'], 'o': ''},
+    check(len(sts) == 1 and sts[0]['barcode'] == NEWBC and sts[0]['state'] == {'f': 'pocket', 'd': ['skew', 'flood_bottom'], 'n': ['marks', 'autograph'], 'o': ''},
           'отметки ушли одним событием: ' + str([e.get('state') for e in sts]))
     check('ДЕФЕКТ' in page.inner_text('#photoList'), 'в списке фотостола видно, что отмечено')
     # другой дефект + сканер, «впечатавший» код в поле

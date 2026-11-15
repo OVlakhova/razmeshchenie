@@ -12,7 +12,7 @@
  */
 
 // ---------------------------------------------------------------- настройки
-var SCRIPT_VERSION = '2.0';   // видно в приложении: Меню -> «скрипт …»
+var SCRIPT_VERSION = '2.1';   // видно в приложении: Меню -> «скрипт …»
 // Какую таблицу открывать. Адрес таблицы: docs.google.com/spreadsheets/d/<ВОТ ЭТО>/edit
 var SPREADSHEET_ID = '1AW5En8QFA7IRrn9FBgCT-TJU_8Qapbmqs4iojxsCsHE';   // ТЕСТ OzonBooks
 
@@ -54,7 +54,9 @@ var STATE = {
   DEFECTS: { skew: 'скос блока', flood: 'залив', flood_bottom: 'залив — нижний край', flood_top: 'залив — верхний край',
              flood_side: 'залив — боковой край', flood_part: 'залив — частично', tear: 'надрыв страницы',
              notitle: 'нет титульного листа', missing: 'нет страниц', stains: 'пятна' },
-  NOTES: { marks: 'надписи и пометки', gift: 'дарственная надпись / автограф' }
+  NOTES: { gift: 'дарственная надпись', autograph: 'автограф автора', marks: 'подчёркивания и пометки в тексте' },
+  // подписи прежних версий — чтобы старые отметки на листе читались
+  NOTES_OLD: { 'надписи и пометки': 'marks', 'дарственная надпись / автограф': 'gift' }
 };
 var STATE_HEADER = ['штрихкод', 'формат', 'дефекты', 'особенности', 'другой дефект', 'кто', 'когда', 'id события'];
 
@@ -210,9 +212,13 @@ Core.stateFromRow = function (fmt, def, notes, other) {
   }
   var f = 'normal';
   for (var k in STATE.FORMATS) if (STATE.FORMATS[k] === String(fmt || '').trim()) f = k;
-  return { f: f, d: back(STATE.DEFECTS, def), n: back(STATE.NOTES, notes), o: String(other || '').trim() };
+  var n = back(STATE.NOTES, notes);
+  String(notes || '').split(';').forEach(function (t) {
+    var k = STATE.NOTES_OLD[t.trim()]; if (k && n.indexOf(k) < 0) n.push(k);
+  });
+  return { f: f, d: back(STATE.DEFECTS, def), n: n, o: String(other || '').trim() };
 };
-Core.stateText = function (st) {           // для журнала: «карманный; скос блока; пятна; другое: …; надписи и пометки»
+Core.stateText = function (st) {           // для журнала: «карманный; скос блока; пятна; другое: …; автограф автора»
   var r = Core.stateRow(st), parts = [r[0]];
   if (r[1]) parts.push(r[1]);
   if (r[3]) parts.push('другое: ' + r[3]);
