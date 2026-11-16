@@ -284,6 +284,27 @@ stSh.rows.push(['2000000777005', 'обычный', '', 'надписи и пом
 const catOld = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'catalog' } }).text);
 assert.deepStrictEqual(catOld.states['2000000777005'].n.sort(), ['gift', 'marks']);
 assert.deepStrictEqual(catOld.states['2000000777004'].n, ['gift', 'autograph', 'marks']);
+// другой человек изменил чужую отметку -> лист «Изменения отметок»; свои правки и одинаковые отметки — нет
+const lgRows = () => (sheets['Изменения отметок'] ? sheets['Изменения отметок'].rows.length : 0);
+assert.strictEqual(lgRows(), 2, 'раньше в тестах Влада изменила отметку Ольги (st5) — это уже одна запись');
+const n0lg = lgRows();
+rs = post([{ id: 'hk1', ts: '2026-11-16T16:36:00Z', type: 'state', barcode: '2000000312637', state: { f: 'normal', d: [], n: [], o: '' } }]);
+assert.strictEqual(rs.results[0].result, 'ok');
+assert.strictEqual(lgRows(), n0lg, 'первая отметка — ничего не логируем');
+rs = post([{ id: 'hk2', ts: '2026-11-16T16:37:00Z', type: 'state', barcode: '2000000312637', state: { f: 'pocket', d: [], n: [], o: '' } }]);
+assert.strictEqual(lgRows(), n0lg, 'своя правка — не логируем');
+rs = postAs(vladaKey, [{ id: 'hk3', ts: '2026-11-16T16:38:00Z', type: 'state', barcode: '2000000312637', state: { f: 'reduced', d: ['skew'], n: [], o: '' } }]);
+assert.strictEqual(rs.results[0].result, 'ok');
+const lg = sheets['Изменения отметок'];
+assert.strictEqual(lg.rows.length, n0lg + 1, 'чужая правка — одна запись');
+assert.deepStrictEqual([...lg.rows[0]], ['когда', 'штрихкод', 'книга', 'было', 'кто отметил раньше', 'когда раньше', 'стало', 'кто изменил']);
+assert.strictEqual(JSON.stringify(lg.rows[lg.rows.length - 1].slice(1)), JSON.stringify(['2000000312637', '', 'карманный', 'Ольга', '16.11.2026 19:37:00', 'уменьшенный; скос блока', 'Влада']));
+assert.strictEqual(stSh.rows.find(r => r[0] === '2000000312637')[1], 'уменьшенный', 'последняя отметка остаётся как есть, без объединения');
+rs = post([{ id: 'hk4', ts: '2026-11-16T16:39:00Z', type: 'state', barcode: '2000000312637', state: { f: 'reduced', d: ['skew'], n: [], o: '' } }]);
+assert.strictEqual(lg.rows.length, n0lg + 1, 'та же отметка другим человеком — не расхождение');
+rs = post([{ id: 'hk5', ts: '2026-11-16T16:40:00Z', type: 'state', barcode: '2000000311869', state: { f: 'pocket', d: [], n: [], o: '' } }]);
+rs = postAs(vladaKey, [{ id: 'hk6', ts: '2026-11-16T16:41:00Z', type: 'state', barcode: '2000000311869', state: { f: 'normal', d: [], n: [], o: '' } }]);
+assert.ok(lg.rows[lg.rows.length - 1][2].length > 0, 'для книги из Лист1 указано название');
 // повторная отправка — не задваивается
 rs = post([{ id: 'st1', ts: '2026-11-13T10:00:00Z', type: 'state', barcode: '2000000777001', state: { f: 'pocket' } }]);
 assert.strictEqual(rs.results[0].result, 'уже получено');

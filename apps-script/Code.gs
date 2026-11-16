@@ -12,7 +12,7 @@
  */
 
 // ---------------------------------------------------------------- настройки
-var SCRIPT_VERSION = '2.2.1';   // видно в приложении: Меню -> «скрипт …»
+var SCRIPT_VERSION = '2.3';   // видно в приложении: Меню -> «скрипт …»
 // Какую таблицу открывать. Адрес таблицы: docs.google.com/spreadsheets/d/<ВОТ ЭТО>/edit
 var SPREADSHEET_ID = '1AW5En8QFA7IRrn9FBgCT-TJU_8Qapbmqs4iojxsCsHE';   // ТЕСТ OzonBooks
 
@@ -22,7 +22,8 @@ var CFG = {
   STOCK_SHEET: 'Остатки 1С',         // выгрузка 1С, только для поиска, НЕ меняется
   JOURNAL_SHEET: 'Журнал размещения',
   ERRORS_SHEET: 'Ошибки',
-  STATE_SHEET: 'Состояние',          // формат, дефекты, особенности по штрихкоду (фотостол и размещение)
+  STATE_SHEET: 'Состояние',
+  STATE_LOG_SHEET: 'Изменения отметок',  // книгу переотметил другой человек: было -> стало (ничего не объединяем)          // формат, дефекты, особенности по штрихкоду (фотостол и размещение)
   // Стандартные упаковки (из списка владелицы, 04.11.2026). Д = длина, Ш = ширина, В = высота, см.
   PACKAGES: [
     { name: '201 - 2 см.', L: 25, W: 17, H: 2 }, { name: '201 - 4 см.', L: 25, W: 17, H: 4 },
@@ -58,6 +59,7 @@ var STATE = {
   // подписи прежних версий — чтобы старые отметки на листе читались
   NOTES_OLD: { 'надписи и пометки': 'marks', 'дарственная надпись / автограф': 'gift' }
 };
+var STATE_LOG_HEADER = ['когда', 'штрихкод', 'книга', 'было', 'кто отметил раньше', 'когда раньше', 'стало', 'кто изменил'];
 var STATE_HEADER = ['штрихкод', 'формат', 'дефекты', 'особенности', 'другой дефект', 'кто', 'когда', 'id события'];
 
 var JOURNAL_HEADER = ['id события', 'получено', 'время скана', 'кто', 'устройство', 'действие',
@@ -482,6 +484,26 @@ function processEvents_(user, device, events) {
     if (!stIndex[bc]) stIndex[bc] = Math.max(stSheet.getLastRow(), 1) + 1;
     return stIndex[bc];
   }
+  function stateExisting(bc) {      // что сейчас записано на листе «Состояние» по книге, или null
+    stateRowFor(bc);
+    var r = stIndex[bc];
+    if (r > stSheet.getLastRow()) return null;
+    var v = stSheet.getRange(r, 1, 1, STATE_HEADER.length).getValues()[0];
+    if (Core.normBarcode(v[0]) !== bc) return null;
+    return { st: Core.stateFromRow(v[1], v[2], v[3], v[4]), who: String(v[5] || ''), when: String(v[6] || '') };
+  }
+  function logStateChange(bc, old, st) {
+    var sh = ss.getSheetByName(CFG.STATE_LOG_SHEET);
+    if (!sh) {
+      sh = ss.insertSheet(CFG.STATE_LOG_SHEET);
+      sh.getRange(1, 1, 1, STATE_LOG_HEADER.length).setValues([STATE_LOG_HEADER]).setFontWeight('bold');
+      sh.setFrozenRows(1);
+    }
+    var title = '';
+    if (index[bc] > 0) title = String(books.getRange(index[bc], C.title).getValue() || '');
+    sh.appendRow([Core.msk(now), bc, title, Core.stateText(old.st), old.who, old.when, Core.stateText(st), user]);
+    sh.getRange(sh.getLastRow(), 1, 1, 2).setNumberFormat('@');
+  }
   var done = {}, lastBy = {};
   function track(vals) {           // последнее применённое событие по штрихкоду — для проверки отмены
     var bc = Core.normBarcode(vals[J.barcode]), type = String(vals[J.type]), res = String(vals[J.result]);
@@ -519,6 +541,9 @@ function processEvents_(user, device, events) {
         ev.barcode = sc.code;
         var st = Core.normState(ev.state);
         if (!st) throw new Error('непонятная отметка состояния');
+        var old = stateExisting(sc.code);
+        // другой человек изменил чужую отметку — не объединяем, а записываем «было -> стало», чтобы проверить
+        if (old && old.who && old.who !== user && Core.stateText(old.st) !== Core.stateText(st)) logStateChange(sc.code, old, st);
         var sr = stateRowFor(sc.code);
         stSheet.getRange(sr, 1).setNumberFormat('@');
         stSheet.getRange(sr, 7).setNumberFormat('@');
