@@ -4,8 +4,8 @@
 
 const API = window.RAZM_API ||
   'https://script.google.com/macros/s/AKfycbxzKklN_XquWi7e9ZKml2iGv7lnRI_gpab86hkXPs7SxT-FT3N4hD2cqfMTwvAksUxyPw/exec';
-const APP_VERSION = '2.2.1';
-const NEED_SCRIPT = '2.2';                   // скрипт старше — в Меню подсказка обновить развертывание
+const APP_VERSION = '2.3';
+const NEED_SCRIPT = '2.4';                   // скрипт старше — в Меню подсказка обновить развертывание
 const ORDERS_EVERY_MS = 3 * 60 * 1000;      // вкладка «Заказы» открыта — обновлять раз в 3 минуты
 const CATALOG_EVERY_MS = 10 * 60 * 1000;     // пока приложение открыто — обновлять справочник раз в 10 минут
 const CATALOG_STALE_MS = 30 * 60 * 1000;     // старше — кнопка «Справочник» жёлтая
@@ -521,7 +521,8 @@ const ST = {
   DEFECTS: [['skew', 'Скос блока'], ['flood', 'Залив'], ['tear', 'Надрыв страницы'], ['notitle', 'Нет титульного листа'],
             ['missing', 'Нет страниц'], ['stains', 'Пятна']],
   FLOODS: [['flood_bottom', 'нижний край'], ['flood_top', 'верхний край'], ['flood_side', 'боковой край'], ['flood_part', 'частично']],
-  NOTES: [['gift', 'Дарственная надпись'], ['autograph', 'Автограф автора'], ['marks', 'Подчёркивания и пометки в тексте']],
+  NOTES: [['gift', 'Дарственная надпись'], ['autograph', 'Автограф автора'], ['marks', 'Подчёркивания и пометки в тексте'],
+          ['stamp', 'Библиотечный штамп']],
 };
 const LABEL = {};               // без Object.fromEntries — его нет в Safari старых iPhone
 [...ST.FORMATS, ...ST.DEFECTS, ...ST.NOTES, ...ST.FLOODS.map(([k, v]) => [k, 'Залив — ' + v])].forEach(([k, v]) => { LABEL[k] = v.toLowerCase(); });
@@ -538,7 +539,7 @@ function stateSummary(st) {
   if (st.f !== 'normal') p.push(LABEL[st.f] + ' формат');
   st.d.forEach(k => p.push(LABEL[k])); if (st.o) p.push(st.o);
   st.n.forEach(k => p.push(LABEL[k]));
-  return p.length ? p.join(', ') : 'обычный, без дефектов';
+  return p.join(', ');           // обычная книга без отметок — пусто: плашку «без дефектов» не показываем
 }
 
 let stTimer = 0;
@@ -547,8 +548,8 @@ async function openState(bc, title) {
   await flushState();
   const st = stateOf(bc);
   const recorded = !!(S.stLocal[bc] || S.states[bc]);
-  // у полки отметки обычно уже сделаны на фотостоле — показываем их коротко, правка по кнопке
-  S.stEdit = { bc, title, st, saved: JSON.stringify(st), recorded, compact: S.mode === 'place' && recorded };
+  // у полки состояние всегда свёрнуто: отметки с фотостола — одной строкой, у обычной книги — только кнопка
+  S.stEdit = { bc, title, st, saved: JSON.stringify(st), recorded, compact: S.mode === 'place' };
   $('otherDef').value = st.o || '';
   renderState();
 }
@@ -632,7 +633,12 @@ function renderState() {
   const st = S.stEdit.st;
   $('stCompact').classList.toggle('hidden', !S.stEdit.compact);
   $('stFull').classList.toggle('hidden', !!S.stEdit.compact);
+  const plain = isPlainState(st);
+  $('stateBlock').querySelector('.sec').classList.toggle('hidden', !!S.stEdit.compact);
   $('stCompactText').textContent = (hasDefect(st) ? 'ДЕФЕКТ: ' : '') + stateSummary(st);
+  $('stCompactText').classList.toggle('hidden', plain);
+  $('stEditBtn').textContent = plain ? 'Отметить состояние' : 'Изменить';
+  $('stCompact').classList.toggle('plain', plain);
   $('stCompact').classList.toggle('defect', hasDefect(st));
   const seg = $('fmtSeg'); seg.innerHTML = '';
   ST.FORMATS.forEach(([k, l]) => seg.appendChild(chip(l, st.f === k, () => editState(s => { s.f = k; }), 'seg-b')));
@@ -659,11 +665,13 @@ function renderState() {
   }), 'bad small')));
   $('otherDef').classList.toggle('hidden', !(st.o || $('otherDef').dataset.open === '1'));
   const nc = $('noteChips'); nc.innerHTML = '';
-  ST.NOTES.forEach(([k, l]) => nc.appendChild(chip(l, st.n.includes(k), () => editState(s => {
+  // «Библиотечный штамп» скрипт понимает с 2.4 — на старом скрипте кнопку не показываем, чтобы отметку не отклонили
+  ST.NOTES.filter(([k]) => k !== 'stamp' || st.n.includes(k) || (S.scriptVer && !verLess(S.scriptVer, '2.4'))).forEach(([k, l]) => nc.appendChild(chip(l, st.n.includes(k), () => editState(s => {
     s.n = s.n.includes(k) ? s.n.filter(x => x !== k) : s.n.concat(k);
   }))));
   const saved = JSON.stringify(st) === S.stEdit.saved;
-  $('stSummary').textContent = (hasDefect(st) ? 'ДЕФЕКТ: ' : '') + stateSummary(st) + (saved ? '' : ' · сохраняю…');
+  $('stSummary').textContent = (hasDefect(st) ? 'ДЕФЕКТ: ' : '') + stateSummary(st) + (saved ? '' : (plain ? 'сохраняю…' : ' · сохраняю…'));
+  $('stSummary').classList.toggle('hidden', plain && saved);
   $('stSummary').classList.toggle('defect', hasDefect(st));
 }
 
@@ -697,7 +705,7 @@ function renderPhoto() {
     const row = document.createElement('div'); row.className = 'row' + (x.defect ? ' bad' : '');
     const d = document.createElement('div');
     const b = document.createElement('b'); b.textContent = x.title || x.bc;
-    const s = document.createElement('span'); s.textContent = (x.title ? x.bc + ' · ' : '') + (x.defect ? 'ДЕФЕКТ: ' : '') + x.sum;
+    const s = document.createElement('span'); s.textContent = [x.title ? x.bc : '', (x.defect ? 'ДЕФЕКТ: ' : '') + x.sum].filter(Boolean).join(' · ');
     d.append(b, s); row.append(d); box.appendChild(row);
   });
 }

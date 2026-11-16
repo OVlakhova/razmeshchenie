@@ -53,7 +53,7 @@ def handle(route, request):
             if e.get('type') in ('place', 'move') and e.get('barcode') in books and books[e['barcode']].get('n'):
                 books[e['barcode']]['c'] = e['cell']
         return route.fulfill(status=200, content_type='application/json',
-                             body=json.dumps({"ok": True, "version": NET["catVersion"], "table": "ТЕСТ OzonBooks", "packages": PK, "books": books}))
+                             body=json.dumps({"ok": True, "version": NET["catVersion"], "table": "ТЕСТ OzonBooks", "ver": "2.4", "packages": PK, "books": books}))
     body = json.loads(request.post_data)
     if NET["tableErr"]:
         return route.fulfill(status=200, content_type='application/json', body=json.dumps({"ok": False, "error": NET["tableErr"]}))
@@ -97,6 +97,9 @@ with sync_playwright() as p:
     scan('2000000311869')
     check('НОВОЕ МЕСТО' in st() and 'Книга с габаритами' in st(), 'книга с габаритами из таблицы')
     check(page.locator('#pkgGrid button.from-table').inner_text() == '201·2', 'упаковка «из таблицы» подсвечена')
+    check(page.is_visible('#stEditBtn') and not page.is_visible('#stFull') and not page.is_visible('#stCompactText')
+          and 'без дефектов' not in page.inner_text('#mainView') and page.inner_text('#stEditBtn') == 'Отметить состояние',
+          'у полки обычная книга без отметок: плашки «без дефектов» нет, только кнопка «Отметить состояние»')
 
     scan('2000000311852')
     check('Книга без габаритов' in st() and 'Выберите упаковку' in st(), 'книга без габаритов просит упаковку')
@@ -367,6 +370,7 @@ with sync_playwright() as p:
     page.locator('#floodChips .chip', has_text='нижний край').click()
     page.locator('#noteChips .chip', has_text='Подчёркивания и пометки').click()
     page.locator('#noteChips .chip', has_text='Автограф автора').click()
+    check(page.locator('#noteChips .chip', has_text='Библиотечный штамп').count() == 1, 'есть особенность «Библиотечный штамп» (скрипт 2.4)')
     check('ДЕФЕКТ' in page.inner_text('#stSummary') and 'карманный' in page.inner_text('#stSummary'), 'итог: ' + page.inner_text('#stSummary'))
     page.screenshot(path='/tmp/razm_photo.png', full_page=True)
     page.wait_for_timeout(1500 + 5500)
@@ -382,6 +386,7 @@ with sync_playwright() as p:
     check('сохранена без «Готово»' in st(), 'забыли «Готово» — предупреждение, что предыдущая сохранена: ' + st().replace('\n', ' | '))
     page.click('#bookDone'); page.wait_for_timeout(300)
     check('СОХРАНЕНО' in st() and not page.is_visible('#stateBlock'), '«Готово» закрывает книгу')
+    check('без дефектов' not in page.inner_text('#photoList') and 'без дефектов' not in st(), 'обычная книга — без плашки «без дефектов»')
     page.wait_for_timeout(6000)
     st2 = [e for e in posted if e.get('type') == 'state' and e['barcode'] == NEWBC2]
     check(len(st2) == 1 and st2[0]['state'] == {'f': 'normal', 'd': [], 'n': [], 'o': ''}, '«обычная, без дефектов» тоже записана: ' + str(st2))

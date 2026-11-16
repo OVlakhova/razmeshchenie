@@ -284,6 +284,11 @@ stSh.rows.push(['2000000777005', 'обычный', '', 'надписи и пом
 const catOld = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'catalog' } }).text);
 assert.deepStrictEqual(catOld.states['2000000777005'].n.sort(), ['gift', 'marks']);
 assert.deepStrictEqual(catOld.states['2000000777004'].n, ['gift', 'autograph', 'marks']);
+// 2.4: библиотечный штамп — особенность, не дефект
+rs = post([{ id: 'st7', ts: '2026-11-16T10:00:00Z', type: 'state', barcode: '2000000777006', state: { f: 'normal', d: [], n: ['stamp'], o: '' } }]);
+assert.strictEqual(rs.results[0].result, 'ok');
+assert.strictEqual(stSh.rows[stSh.rows.length - 1][3], 'библиотечный штамп');
+assert.strictEqual(stSh.rows[stSh.rows.length - 1][2], '');
 // другой человек изменил чужую отметку -> лист «Изменения отметок»; свои правки и одинаковые отметки — нет
 const lgRows = () => (sheets['Изменения отметок'] ? sheets['Изменения отметок'].rows.length : 0);
 assert.strictEqual(lgRows(), 2, 'раньше в тестах Влада изменила отметку Ольги (st5) — это уже одна запись');
