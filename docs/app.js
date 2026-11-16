@@ -4,7 +4,8 @@
 
 const API = window.RAZM_API ||
   'https://script.google.com/macros/s/AKfycbxzKklN_XquWi7e9ZKml2iGv7lnRI_gpab86hkXPs7SxT-FT3N4hD2cqfMTwvAksUxyPw/exec';
-const APP_VERSION = '2.2';
+const APP_VERSION = '2.2.1';
+const NEED_SCRIPT = '2.2';                   // скрипт старше — в Меню подсказка обновить развертывание
 const ORDERS_EVERY_MS = 3 * 60 * 1000;      // вкладка «Заказы» открыта — обновлять раз в 3 минуты
 const CATALOG_EVERY_MS = 10 * 60 * 1000;     // пока приложение открыто — обновлять справочник раз в 10 минут
 const CATALOG_STALE_MS = 30 * 60 * 1000;     // старше — кнопка «Справочник» жёлтая
@@ -133,9 +134,9 @@ async function api(method, params, body) {
   } catch (e) { throw Object.assign(new Error('нет сети'), { net: true }); }
   try { j = await r.json(); }
   catch (e) { throw new Error('таблица ответила не так — скрипт не опубликован или нужно разрешение'); }
+  if (j.ver && j.ver !== S.scriptVer) { S.scriptVer = j.ver; DB.set('scriptVer', j.ver); }
   if (!j.ok) throw new Error(j.error || 'ошибка таблицы');
   if (j.table) S.table = j.table;
-  if (j.ver) S.scriptVer = j.ver;
   return j;
 }
 
@@ -858,6 +859,16 @@ function renderTop() {
   $('catBtn').textContent = S.busy ? 'Обновляю…' : `Справочник ${S.catalogAt ? hhmm(S.catalogAt) : '—'} ↻`;
 }
 
+function verLess(a, b) {           // '1.9.2' < '2.2'
+  const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number);
+  for (let i = 0; i < Math.max(x.length, y.length); i++) { if ((x[i] || 0) !== (y[i] || 0)) return (x[i] || 0) < (y[i] || 0); }
+  return false;
+}
+function scriptVerText() {
+  if (!S.scriptVer) return 'скрипт: ещё не ответил (или версия до 1.9.2)';
+  return 'скрипт ' + S.scriptVer + (verLess(S.scriptVer, NEED_SCRIPT) ? ` — устарел, нужен ${NEED_SCRIPT}: обновите развертывание` : '');
+}
+
 function hhmm(iso) { const d = new Date(iso); return isNaN(d) ? '—' : d.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }); }
 
 async function saveSession() {
@@ -1092,6 +1103,7 @@ async function start() {
   const cat = await DB.get('catalog');
   if (cat) { S.catalog = cat.books || {}; S.packages = cat.packages || []; S.catalogAt = cat.at || ''; S.table = cat.table || ''; S.states = cat.states || {}; await overlayQueue(); }
   S.stLocal = await DB.get('stLocal') || {};
+  S.scriptVer = await DB.get('scriptVer') || '';
   S.photoLog = await DB.get('photoLog') || [];
   const sess = await DB.get('session');
   if (sess) {
@@ -1210,7 +1222,7 @@ function bind() {
   $('camCodeOk').onclick = camOk;
   $('camCode').addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); camOk(); } });
   $('menuBtn').onclick = () => {
-    $('mInfo').textContent = `Версия ${APP_VERSION} · скрипт ${S.scriptVer || 'старый'} · таблица: ${S.table || 'неизвестно'} · справочник: ${S.catalogAt ? new Date(S.catalogAt).toLocaleString('ru-RU') : 'не загружен'} · книг в справочнике: ${Object.keys(S.catalog).length}`;
+    $('mInfo').textContent = `Версия ${APP_VERSION} · ${scriptVerText()} · таблица: ${S.table || 'неизвестно'} · справочник: ${S.catalogAt ? new Date(S.catalogAt).toLocaleString('ru-RU') : 'не загружен'} · книг в справочнике: ${Object.keys(S.catalog).length}`;
     $('menuSheet').classList.remove('hidden');
   };
   $('mClose').onclick = () => { $('menuSheet').classList.add('hidden'); focusScan(); };

@@ -12,7 +12,7 @@
  */
 
 // ---------------------------------------------------------------- настройки
-var SCRIPT_VERSION = '2.2';   // видно в приложении: Меню -> «скрипт …»
+var SCRIPT_VERSION = '2.2.1';   // видно в приложении: Меню -> «скрипт …»
 // Какую таблицу открывать. Адрес таблицы: docs.google.com/spreadsheets/d/<ВОТ ЭТО>/edit
 var SPREADSHEET_ID = '1AW5En8QFA7IRrn9FBgCT-TJU_8Qapbmqs4iojxsCsHE';   // ТЕСТ OzonBooks
 
@@ -402,6 +402,7 @@ function revokeKey(key) {
 
 // ------------------------------------------------------------ веб-приложение
 function json_(o) {
+  o.ver = SCRIPT_VERSION;            // версия скрипта в каждом ответе (и в ошибках) — видно в Меню приложения
   return ContentService.createTextOutput(JSON.stringify(o)).setMimeType(ContentService.MimeType.JSON);
 }
 

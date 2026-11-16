@@ -179,6 +179,7 @@ assert.strictEqual(row(1)[hm['Артикул']], 'С19-П2_2000000311869');
 // чужой ключ
 const bad = JSON.parse(vm.runInContext('doPost', ctx)({ postData: { contents: JSON.stringify({ key: 'nope', events: [] }) } }).text);
 assert.strictEqual(bad.ok, false);
+assert.ok(bad.ver, 'версия скрипта есть даже в ответе с ошибкой');
 
 // журнал и ошибки
 const journal = sheets['Журнал размещения'];
