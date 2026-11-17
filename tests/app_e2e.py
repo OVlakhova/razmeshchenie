@@ -427,7 +427,7 @@ with sync_playwright() as p:
 
     # 2.4 / скрипт 2.5: сфотографировали -> фотостол -> полка, а описали потом
     UND = ean('200000060001')
-    NET["pend"] = {UND}
+    NET["pend"] = {UND}  # ещё не описана
     scan('991001002'); page.wait_for_timeout(1600)
     scan(UND); page.wait_for_timeout(400)
     check('НЕИЗВЕСТНЫЙ' in st(), 'со скриптом 2.4 неописанная книга — как раньше, красный экран')
@@ -458,6 +458,33 @@ with sync_playwright() as p:
     check('УЖЕ ПИКНУТА' in st(), 'повторный пик неописанной книги на той же полке не задваивается')
     page.click('#catBtn'); page.wait_for_timeout(800)
     check(page.evaluate(f"!!(S.catalog['{UND}'] && S.catalog['{UND}'].c === 'С1-П2')"), 'после обновления справочника телефон помнит, где стоит неописанная книга')
+
+    # 2.5: пики не теряются, весь список полки виден с полными штрихкодами
+    page.click('#doneBtn'); page.wait_for_timeout(800)
+    scan('991013003'); page.wait_for_timeout(1600)
+    many = [ean('2000000610' + str(i).zfill(2)) for i in range(10)]
+    for i, c in enumerate(many[:8]):
+        scan(c); page.wait_for_timeout(100)
+        if i < 7: page.locator('#pkgGrid button', has_text='201·2').click(); page.wait_for_timeout(150)
+    # пикнули 9-ю, не выбрав упаковку у 8-й — 9-я не теряется
+    scan(many[8]); page.wait_for_timeout(300)
+    check('запомнена' in st(), 'книга, пикнутая до выбора упаковки, запомнена')
+    page.locator('#pkgGrid button', has_text='201·2').click(); page.wait_for_timeout(500)
+    check(many[8] in st(), 'после выбора упаковки запомненная книга открылась сама')
+    page.locator('#pkgGrid button', has_text='201·2').click(); page.wait_for_timeout(150)
+    # пик во время обновления справочника — ждёт, а не отбрасывается
+    page.evaluate('S.busy = true'); scan(many[9]); page.wait_for_timeout(400)
+    page.evaluate('S.busy = false'); page.wait_for_timeout(600)
+    check(many[9] in st(), 'пик во время обновления справочника обработан после него, а не потерян')
+    page.locator('#pkgGrid button', has_text='201·2').click(); page.wait_for_timeout(150)
+    page.click('#bookDone'); page.wait_for_timeout(1500)
+    rows = page.locator('#shelf .row').all_inner_texts()
+    check(len(rows) == 10, f'в списке все 10 книг (раньше — только 8): {len(rows)}')
+    check(rows[0].startswith('10. ' + many[9]) and rows[-1].startswith('1. ' + many[0]), 'новые сверху, номер по порядку пика, штрихкод целиком: ' + rows[0].split('\n')[0] + ' … ' + rows[-1].split('\n')[0])
+    bc_box = page.locator('#shelf .row b.bc').first.bounding_box(); btn_box = page.locator('#shelf .row button').first.bounding_box()
+    check(bc_box['x'] + bc_box['width'] <= btn_box['x'], 'штрихкод не залезает под кнопку «Упаковка»')
+    posted_codes = {e['barcode'] for e in posted if e.get('type') == 'place'}
+    check(all(c in posted_codes for c in many), 'все 10 пиков ушли в таблицу')
 
     page.screenshot(path='/tmp/razm_e2e.png')
     check(not errors, 'нет ошибок JavaScript ' + (str(errors) if errors else ''))
