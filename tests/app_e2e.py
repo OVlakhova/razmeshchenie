@@ -105,9 +105,9 @@ with sync_playwright() as p:
     check('Книга без габаритов' in st() and 'Выберите упаковку' in st(), 'книга без габаритов просит упаковку')
     scan('2000000311845')
     check('ВЫБЕРИТЕ УПАКОВКУ' in st(), 'следующий пик заблокирован без упаковки')
-    page.locator('#pkgGrid button', has_text='Разв·5').click(); page.wait_for_timeout(150)
-    scan('2000000311845')
-    check('ЭКЗЕМПЛЯР 1 ИЗ 2' in st(), 'несколько экземпляров: 1 из 2')
+    check('запомнена' in st(), 'пикнутая без упаковки книга не теряется — запомнена: ' + st().replace('\n', ' | '))
+    page.locator('#pkgGrid button', has_text='Разв·5').click(); page.wait_for_timeout(300)
+    check('ЭКЗЕМПЛЯР 1 ИЗ 2' in st(), 'после выбора упаковки запомненная книга записалась сама: 1 из 2')
     check(page.locator('#pkgGrid button.sel').count() == 0 and 'Выберите упаковку' in st(),
           'другая книга без габаритов: упаковка прошлой книги НЕ подставлена')
     scan('2000000311845')   # двойной пик < 1.5 с игнорируется
@@ -115,9 +115,7 @@ with sync_playwright() as p:
     page.wait_for_timeout(1600)
     scan('2000000311845')
     check('ВЫБЕРИТЕ УПАКОВКУ' in st(), 'экземпляр 1 без упаковки не закрывается следующим пиком')
-    page.locator('#pkgGrid button', has_text='201·2').click(); page.wait_for_timeout(150)
-    page.wait_for_timeout(1600)
-    scan('2000000311845')
+    page.locator('#pkgGrid button', has_text='201·2').click(); page.wait_for_timeout(300)
     check('ЭКЗЕМПЛЯР 2 ИЗ 2' in st() and 'Выберите упаковку' not in st(), 'второй экземпляр той же книги берёт её упаковку')
     check(page.locator('#pkgGrid button.sel').inner_text() == '201·2', 'у второго экземпляра выбрана 201·2')
 

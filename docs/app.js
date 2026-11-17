@@ -4,7 +4,7 @@
 
 const API = window.RAZM_API ||
   'https://script.google.com/macros/s/AKfycbxzKklN_XquWi7e9ZKml2iGv7lnRI_gpab86hkXPs7SxT-FT3N4hD2cqfMTwvAksUxyPw/exec';
-const APP_VERSION = '2.4';
+const APP_VERSION = '2.5';
 const NEED_SCRIPT = '2.5';                   // скрипт старше — в Меню подсказка обновить развертывание
 const ORDERS_EVERY_MS = 3 * 60 * 1000;      // вкладка «Заказы» открыта — обновлять раз в 3 минуты
 const CATALOG_EVERY_MS = 10 * 60 * 1000;     // пока приложение открыто — обновлять справочник раз в 10 минут
@@ -264,17 +264,29 @@ function pkgLabel(p) {
 }
 
 // ------------------------------------------------------------ сканы
-async function onScan(raw) {
+// Пики обрабатываются строго по очереди: пока идёт предыдущий (или обновляется справочник),
+// следующий ждёт, а не теряется.
+let scanChain = Promise.resolve();
+function runScan(fn) {
+  const p = scanChain.then(async () => {
+    for (let i = 0; S.busy && i < 150; i++) await new Promise(r => setTimeout(r, 100));
+    return fn();
+  }).catch(e => console.error(e));
+  scanChain = p;
+  return p;
+}
+function onScan(raw) {
   const code = Codes.classify(raw);
   const now = Date.now();
-  if (code.code === S.lastScan.code && now - S.lastScan.at < DOUBLE_SCAN_MS) return;  // двойной пик
+  if (code.code === S.lastScan.code && now - S.lastScan.at < DOUBLE_SCAN_MS) return Promise.resolve();  // двойной пик
   S.lastScan = { code: code.code, at: now };
   S.lastActivity = now;
   S.lastUndoAt = 0; S.undoArmed = null;
-  if (S.busy) { beep('bad'); show('warn', 'ПОДОЖДИТЕ', '', 'Обновляю справочник', 'Пикните ещё раз через пару секунд'); S.lastScan = { code: '', at: 0 }; return; }
-  hideActions();
-  const accepted = await handleScan(code);
-  if (!accepted) S.lastScan = { code: '', at: 0 };   // отклонённый пик можно сразу повторить
+  return runScan(async () => {
+    hideActions();
+    const accepted = await handleScan(code);
+    if (!accepted && S.lastScan.code === code.code) S.lastScan = { code: '', at: 0 };   // отклонённый пик можно сразу повторить
+  });
 }
 
 /** true — пик принят; false — отклонён (повторный пик того же кода не считается двойным). */
@@ -301,11 +313,11 @@ async function handleScan(code) {
 
   // книга
   if (!S.cell) { beep('bad'); show('bad', 'СНАЧАЛА ЯЧЕЙКА', '', 'Пикните этикетку ячейки', 'Книга не записана'); return false; }
-  if (!await commitCurrent()) return false;
+  if (!await commitCurrent(code)) return true;          // упаковка не выбрана — эта книга запомнена и запишется сразу после выбора
   const book = S.catalog[code.code];
   const warn = code.checksumOk || code.code.length !== 13 ? '' : 'Проверьте штрихкод: контрольная цифра не сходится';
 
-  if (!book && !code.recheck && navigator.onLine && (!S.catalogAt || Date.now() - Date.parse(S.catalogAt) > 30 * 1000)) {
+  if (!book && !code.recheck && !(isOurSticker(code.code) && canPlaceUndescribed()) && navigator.onLine && (!S.catalogAt || Date.now() - Date.parse(S.catalogAt) > 30 * 1000)) {
     S.busy = true; renderTop();
     show('info', 'ИЩУ В ТАБЛИЦЕ', '', code.code, 'Книги нет в справочнике телефона — обновляю его');
     await loadCatalog(true);
@@ -381,13 +393,19 @@ async function startCurrent(code, book, type, warn) {
 }
 
 /** Поставить текущий пик в очередь. false — нельзя (не выбрана упаковка). */
-async function commitCurrent() {
+async function commitCurrent(next) {
   const c = S.current;
   if (!c) return true;
   await flushState();
   if (c.needsPkg && !c.ev.pkg) {
     beep('bad');
-    show('bad', 'ВЫБЕРИТЕ УПАКОВКУ', '', c.book.t, 'У этой книги нет габаритов в таблице', 'Следующий пик не принят');
+    if (next && next.kind === 'book') {
+      S.heldScan = next;
+      show('bad', 'ВЫБЕРИТЕ УПАКОВКУ', '', c.book.t, 'Сначала упаковка для этой книги',
+           `Следующая книга (…${next.code.slice(-6)}) запомнена — запишу её сразу после выбора упаковки`);
+    } else {
+      show('bad', 'ВЫБЕРИТЕ УПАКОВКУ', '', c.book.t, 'У этой книги нет габаритов в таблице', 'Следующий пик не принят');
+    }
     renderPackages();
     return false;
   }
@@ -411,6 +429,7 @@ async function choosePkg(p) {
     renderShelf();
     await DB.set('current', S.current);
     show(stateKind(), $('stLbl').textContent, '', S.current.book.t, $('stMeta').textContent, '');
+    if (S.heldScan) { const h = S.heldScan; S.heldScan = null; runScan(() => handleScan(h)); }   // книга, пикнутая до выбора упаковки
   } else if (S.editShelf) {      // исправить упаковку уже поставленной книги
     const it = S.editShelf; S.editShelf = null;
     it.pkg = Object.assign({}, p);
@@ -439,13 +458,16 @@ async function undo() {
                 'Вы только что уже отменили пик. Если нужно отменить и эту книгу — нажмите «Отменить» ещё раз.');
   }
   S.lastUndoAt = now; S.undoArmed = null;
+  const held = S.heldScan; S.heldScan = null;
   if (S.current) {
     S.counts[S.current.ev.barcode]--;
     const t = S.current.book.t;
     S.current = null; await DB.set('current', null);
     await saveSession();
     renderPackages(); renderShelf();
-    return show('gray', 'ОТМЕНЕНО', '', t, 'Пик удалён, в таблицу ничего не ушло');
+    show('gray', 'ОТМЕНЕНО', '', t, 'Пик удалён, в таблицу ничего не ушло');
+    if (held) runScan(() => handleScan(held));           // книга, пикнутая следом, не теряется
+    return;
   }
   const last = S.shelf.shift();
   if (!last) { S.lastUndoAt = 0; return show('gray', 'НЕЧЕГО ОТМЕНЯТЬ', '', '', ''); }
@@ -960,11 +982,16 @@ function renderShelf() {
     if (S.stEdit && S.stEdit.bc === S.current.ev.barcode && !isPlainState(S.stEdit.st)) s.textContent += ' · ' + stateSummary(S.stEdit.st);
     d.append(b, s); row.append(d); box.appendChild(row);
   }
-  S.shelf.slice(0, 8).forEach(it => {
+  const total = S.shelf.length;
+  S.shelf.forEach((it, i) => {                         // все книги полки, новые сверху; номер — по порядку пика
     const row = document.createElement('div'); row.className = 'row';
     const d = document.createElement('div');
-    const b = document.createElement('b'); b.textContent = it.title;
-    const s = document.createElement('span'); s.textContent = pkgLabel(it.pkg) || 'габариты из таблицы';
+    const b = document.createElement('b'); b.className = 'bc';
+    const no = document.createElement('i'); no.textContent = (total - i) + '.';
+    b.append(no, document.createTextNode(' ' + it.barcode));
+    const undesc = /^Ещё не описана/.test(it.title || '');
+    const s = document.createElement('span');
+    s.textContent = [undesc ? 'не описана' : it.title, pkgLabel(it.pkg) || 'габариты из таблицы'].filter(Boolean).join(' · ');
     const sti = stateOf(it.barcode);
     if (!isPlainState(sti)) s.textContent += ' · ' + (hasDefect(sti) ? 'ДЕФЕКТ: ' : '') + stateSummary(sti);
     const rj = S.rejected[it.id];

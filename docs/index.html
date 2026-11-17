@@ -95,7 +95,10 @@ button{font-family:inherit;color:inherit}
 .shelf .row div{flex:1;min-width:0}
 .shelf .row b{display:block;font-size:16px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .shelf .row span{font-size:14px;color:var(--quiet)}
-.shelf .row button{width:104px;height:48px;border:1px solid #d4d4cf;border-radius:12px;background:#fff;font-size:15px;font-weight:600}
+.shelf .row b.bc{font-variant-numeric:tabular-nums;letter-spacing:.2px;white-space:nowrap;overflow:visible}
+.shelf .row b.bc i{font-style:normal;color:var(--quiet);font-weight:600}
+.shelf .row:not(.cur) span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.shelf .row button{flex:none;width:96px;height:48px;border:1px solid #d4d4cf;border-radius:12px;background:#fff;font-size:15px;font-weight:600}
 .spacer{flex:1}
 .bottom{position:sticky;bottom:0;display:flex;gap:10px;padding:12px;background:#fff;border-top:1px solid var(--line)}
 .undo{flex:1;height:56px;border:2px solid var(--bad);border-radius:12px;background:#fff;color:var(--bad);font-size:16px;font-weight:700}
