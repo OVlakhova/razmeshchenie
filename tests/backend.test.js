@@ -54,7 +54,7 @@ const ctx = {
   SpreadsheetApp: null,
   PropertiesService: { getScriptProperties: () => ({ getProperty: k => props[k] || null, setProperty: (k, v) => { props[k] = v; } }) },
   CacheService: { getScriptCache: () => ({ get: () => null, put: () => {} }) },
-  LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
+  LockService: { getScriptLock: () => ({ waitLock() {}, tryLock() { return true; }, releaseLock() {} }) },
   ContentService: { MimeType: { JSON: 'json' }, createTextOutput: t => ({ setMimeType: () => ({ text: t }) }) },
   Utilities: { getUuid: () => 'key-' + Math.random().toString(36).slice(2) },
   Logger: { log: () => {} },
@@ -383,4 +383,78 @@ ctx.UrlFetchApp.fetch = () => resp(401, {});
 o = JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'orders' } }).text);
 assert.ok(!o.ok && o.error.includes('401'), o.error);
 
-console.log('Все проверки пройдены:', 'Core + события + безопасная отмена + перемещение + справочник + заказы WB + состояние');
+
+// ---------- 2.5: книгу поставили раньше, чем описали ----------
+const ean = p12 => { let s = 0; for (let i = 0; i < 12; i++) s += +p12[i] * (i % 2 ? 3 : 1); return p12 + ((10 - s % 10) % 10); };
+const jrows = () => sheets['Журнал размещения'].rows;
+const jres = id => { const x = jrows().find(r => String(r[0]) === id); return x && x[12]; };
+const errN = () => sheets['Ошибки'].rows.length;
+const catalog = () => JSON.parse(vm.runInContext('doGet', ctx)({ parameter: { key: olgaKey, action: 'catalog' } }).text);
+const P1 = ean('200000050001'), P2 = ean('200000050002'), P3 = ean('200000050003'), P4 = ean('200000050004'), P5 = ean('200000050005'), P6 = ean('200000050006');
+let e0 = errN();
+// 1) неописанная книга с нашей наклейкой -> «ждёт описания», не ошибка
+rs = postAs(vladaKey, [{ id: 'w1', ts: '2026-11-17T09:00:00Z', type: 'place', cell: 'С1-П2', barcode: P1, pkg: { name: 'Развертка - 5 см.' } }]);
+assert.strictEqual(rs.results[0].result, 'ждёт описания');
+assert.strictEqual(errN(), e0, 'в «Ошибки» не попала');
+// чужой код (не 200…) и наша наклейка с неверной контрольной цифрой — по-прежнему ошибка
+rs = post([{ id: 'w1x', ts: '2026-11-17T09:00:01Z', type: 'place', cell: 'С1-П2', barcode: '9785041104634' },
+           { id: 'w1y', ts: '2026-11-17T09:00:02Z', type: 'place', cell: 'С1-П2', barcode: P1.slice(0, 12) + ((+P1[12] + 1) % 10) }]);
+assert.ok(rs.results.every(x => x.result.includes('нет в')), JSON.stringify(rs.results));
+e0 = errN();
+let pcat = catalog();
+assert.ok(pcat.ok, pcat.error);
+assert.deepStrictEqual([pcat.books[P1].c, pcat.books[P1].pend, pcat.books[P1].n], ['С1-П2', 1, 1], 'телефон знает, где стоит неописанная книга');
+// 2) книгу описали (парсер дописал строку) -> место вписывается само при следующем обращении
+const r1 = addBook(201, 'Описали потом', P1);
+pcat = catalog();
+let b = books.rows[r1];
+assert.strictEqual(b[hm['Место хранения']], 'С1-П2');
+assert.strictEqual(b[hm['Артикул']], 'С1-П2_' + P1);
+assert.strictEqual(b[hm['Упаковка']], 'Развертка - 5 см.');
+assert.deepStrictEqual([b[hm['Длина']], b[hm['Ширина']], b[hm['Высота']]], [22, 15, 5]);
+assert.strictEqual(b[hm['Размещено']], '17.11.2026 12:00:00', 'время — когда пикнули, а не когда описали');
+assert.strictEqual(b[hm['Размещено кем']], 'Влада');
+assert.strictEqual(jres('w1'), 'ok', 'в журнале пик стал «ok»');
+assert.ok(!pcat.books[P1].pend && pcat.books[P1].c === 'С1-П2', 'в справочнике — обычная книга');
+// и его можно отменить как обычный пик
+assert.strictEqual(res1(post([{ id: 'w1u', ts: '2026-11-17T10:00:00Z', type: 'undo', undoOf: 'w1' }])), 'отменено');
+assert.strictEqual(books.rows[r1][hm['Место хранения']], ''); assert.strictEqual(books.rows[r1][hm['Упаковка']], '');
+// 3) переставили на другую полку до описания -> действует последний пик
+post([{ id: 'w2', ts: '2026-11-17T09:10:00Z', type: 'place', cell: 'С1-П2', barcode: P2, pkg: { name: '201 - 2 см.' } }]);
+post([{ id: 'w2m', ts: '2026-11-17T09:20:00Z', type: 'move', cell: 'С4-П3', barcode: P2, pkg: { name: '201 - 2 см.' } }]);
+assert.strictEqual(catalog().books[P2].c, 'С4-П3');
+const r2 = addBook(202, 'Переставили', P2);
+catalog();
+assert.strictEqual(books.rows[r2][hm['Место хранения']], 'С4-П3');
+assert.strictEqual(books.rows[r2][hm['Артикул']], 'С4-П3_' + P2);
+assert.ok(jres('w2').startsWith('заменено'), jres('w2'));
+// 4) отменили до описания -> ничего не впишется
+post([{ id: 'w3', ts: '2026-11-17T09:30:00Z', type: 'place', cell: 'С1-П2', barcode: P3, pkg: { name: '201 - 2 см.' } }]);
+assert.strictEqual(res1(post([{ id: 'w3u', ts: '2026-11-17T09:31:00Z', type: 'undo', undoOf: 'w3' }])), 'отменено');
+assert.strictEqual(jres('w3'), 'отменено до описания');
+assert.ok(!catalog().books[P3], 'отменённая неописанная книга не числится на полке');
+const r3 = addBook(203, 'Отменили', P3); catalog();
+assert.strictEqual(books.rows[r3][hm['Место хранения']], '', 'после описания место не появилось');
+// 5) исправили упаковку до описания -> впишется исправленная; отмена пика возвращает строку как была
+post([{ id: 'w4', ts: '2026-11-17T09:40:00Z', type: 'place', cell: 'С1-П2', barcode: P4, pkg: { name: '201 - 2 см.' } }]);
+post([{ id: 'w4f', ts: '2026-11-17T09:40:30Z', type: 'place', cell: 'С1-П2', barcode: P4, pkg: { name: 'Развертка - 7 см.' }, fixOf: 'w4' }]);
+const r4 = addBook(204, 'Исправили', P4); catalog();
+assert.strictEqual(books.rows[r4][hm['Упаковка']], 'Развертка - 7 см.');
+assert.strictEqual(res1(post([{ id: 'w4u', ts: '2026-11-17T10:00:00Z', type: 'undo', undoOf: 'w4' }])), 'отменено');
+assert.strictEqual(books.rows[r4][hm['Место хранения']], ''); assert.strictEqual(books.rows[r4][hm['Упаковка']], '');
+// 6) не описали за 3 дня -> одна строка в «Ошибки», но ждём дальше
+e0 = errN();
+post([{ id: 'w5', ts: '2026-11-10T09:00:00Z', type: 'place', cell: 'С2-П1', barcode: P5, pkg: { name: '201 - 2 см.' } }]);
+catalog(); catalog();
+assert.strictEqual(errN(), e0 + 1, 'одна строка в «Ошибки»');
+assert.ok(sheets['Ошибки'].rows[errN() - 1][5].includes('больше 3 дней'));
+const r5 = addBook(205, 'Поздно описали', P5); catalog();
+assert.strictEqual(books.rows[r5][hm['Место хранения']], 'С2-П1', 'описали позже — место всё равно вписалось');
+// 7) книгу описали и успели поставить в другое место обычным пиком -> отложенный пик не перетирает
+post([{ id: 'w6', ts: '2026-11-17T09:50:00Z', type: 'place', cell: 'С1-П2', barcode: P6, pkg: { name: '201 - 2 см.' } }]);
+const r6 = addBook(206, 'Уже стоит', P6); books.rows[r6][hm['Место хранения']] = 'С9-П9';
+e0 = errN(); catalog();
+assert.strictEqual(books.rows[r6][hm['Место хранения']], 'С9-П9');
+assert.ok(jres('w6').includes('уже размещена'), jres('w6'));
+assert.strictEqual(errN(), e0 + 1);
+console.log('Все проверки пройдены:', 'Core + события + безопасная отмена + перемещение + справочник + заказы WB + состояние + размещение до описания');

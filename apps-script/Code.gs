@@ -12,7 +12,7 @@
  */
 
 // ---------------------------------------------------------------- настройки
-var SCRIPT_VERSION = '2.4';   // видно в приложении: Меню -> «скрипт …»
+var SCRIPT_VERSION = '2.5';   // видно в приложении: Меню -> «скрипт …»
 // Какую таблицу открывать. Адрес таблицы: docs.google.com/spreadsheets/d/<ВОТ ЭТО>/edit
 var SPREADSHEET_ID = '1AW5En8QFA7IRrn9FBgCT-TJU_8Qapbmqs4iojxsCsHE';   // ТЕСТ OzonBooks
 
@@ -67,8 +67,14 @@ var JOURNAL_HEADER = ['id события', 'получено', 'время ск�
   'было: ячейка', 'было: артикул', 'было: упаковка', 'было: Д', 'было: Ш', 'было: В', 'было: размещено',
   'к событию',      // исправление упаковки -> id исходного пика; отмена -> id отменённого пика
   'было: кем', 'состояние'];
-var J = { id: 0, ts: 2, type: 5, barcode: 6, cell: 7, result: 12, row: 13, prevCell: 14, prevArticle: 15, prevPkg: 16,
-          prevL: 17, prevW: 18, prevH: 19, prevAt: 20, ref: 21, prevBy: 22, state: 23 };
+var J = { id: 0, got: 1, ts: 2, user: 3, type: 5, barcode: 6, cell: 7, pkg: 8, L: 9, W: 10, H: 11, result: 12, row: 13,
+          prevCell: 14, prevArticle: 15, prevPkg: 16, prevL: 17, prevW: 18, prevH: 19, prevAt: 20, ref: 21, prevBy: 22, state: 23 };
+
+// Книгу поставили на полку раньше, чем описали (её строки ещё нет в «Лист1»).
+// Пик лежит в журнале с этим результатом и применяется сам, как только строка появится.
+var PENDING = 'ждёт описания';
+var PENDING_DAYS = 3;              // столько ждём, потом — строка в «Ошибки» (но ждать продолжаем)
+
 
 // ============================================================ ЧИСТАЯ ЛОГИКА
 // (без обращений к таблице — проверяется тестами вне Google)
@@ -110,6 +116,24 @@ Core.cellCode = function (cell) {
   var m = /^С(\d+)-П(\d+)$/.exec(String(cell).trim());
   if (!m) return '';
   return '991' + ('00' + m[1]).slice(-3) + ('00' + m[2]).slice(-3);
+};
+
+/** Наша наклейка: 13 цифр, начинается с 200, контрольная цифра сходится. Только такие книги можно ставить до описания. */
+Core.isOurSticker = function (code) { return /^200\d{10}$/.test(code) && Core.ean13ok(code); };
+
+/**
+ * Какие отложенные пики применять. pend: [{i, bc, ts, id, ref}] в порядке журнала.
+ * По каждой книге действует самый поздний пик; более ранние — «заменено» (в т.ч. исходный пик, если потом поправили упаковку).
+ * Возвращает {use: {i:true}, replaced: {i:true}}.
+ */
+Core.pendingPlan = function (pend) {
+  var latest = {}, use = {}, replaced = {};
+  pend.forEach(function (p) {
+    var cur = latest[p.bc];
+    if (!cur || Core.toMs(p.ts) >= Core.toMs(cur.ts)) latest[p.bc] = p;
+  });
+  pend.forEach(function (p) { if (latest[p.bc] === p) use[p.i] = true; else replaced[p.i] = true; });
+  return { use: use, replaced: replaced };
 };
 
 // Время в таблице пишется по Москве: "04.11.2026 12:24:05" (UTC+3, без перехода на летнее время).
@@ -422,6 +446,7 @@ function doGet(e) {
 
 function catalog_() {
   var ss = ss_();
+  var waiting = applyPending_(ss, false);       // книги, которые описали после того, как поставили, — вписать место сейчас
   var books = readTable_(booksSheet_(ss), { barcode: CFG.COL.barcode, title: CFG.COL.title, author: CFG.COL.author,
     cell: CFG.COL.cell, qty: CFG.COL.qty, L: CFG.COL.L, W: CFG.COL.W, H: CFG.COL.H, article: CFG.COL.article });
   var archive = [];
@@ -430,8 +455,12 @@ function catalog_() {
   });
   var stock = readTable_(CFG.STOCK_SHEET, { barcode: CFG.STOCK_COL.barcode, title: CFG.STOCK_COL.title,
     author: CFG.STOCK_COL.author, cell: CFG.STOCK_COL.cell, article: CFG.STOCK_COL.article, free: CFG.STOCK_COL.free });
+  var cat = Core.buildCatalog(books, archive, stock);
+  for (var bc in waiting) {                     // ещё не описаны — телефон должен знать, где они стоят
+    if (!cat[bc]) cat[bc] = { t: '', a: '', s: {}, n: 1, q: 1, c: waiting[bc].cell, ar: '', pend: 1 };
+  }
   return { ok: true, version: new Date().toISOString(), table: ss_().getName(), ver: SCRIPT_VERSION, packages: packages_(),
-           books: Core.buildCatalog(books, archive, stock), states: states_(ss) };
+           books: cat, states: states_(ss) };
 }
 
 /**
@@ -455,6 +484,7 @@ function doPost(e) {
 
 function processEvents_(user, device, events) {
   var ss = ss_();
+  applyPending_(ss, true);
   var books = booksSheet_(ss);
   var journal = ss.getSheetByName(CFG.JOURNAL_SHEET);
   var errors = ss.getSheetByName(CFG.ERRORS_SHEET);
@@ -554,10 +584,24 @@ function processEvents_(user, device, events) {
         ref = String(ev.undoOf || '');
         var orig = done[ref];
         if (!orig) throw new Error('не найдено событие для отмены');
-        if (orig.vals[J.result] !== 'ok') throw new Error('отменять нечего: исходный пик не был применён (' + orig.vals[J.result] + ')');
+        var ores = String(orig.vals[J.result]);
+        if (ores.indexOf(PENDING) === 0 || ores === PENDING_REPLACED) {
+          // книга ещё не описана: отменяем сам пик и его исправления упаковки, в «Лист1» писать нечего
+          var fixApplied = null;
+          for (var did in done) {
+            var dv = done[did].vals;
+            if (did !== ref && String(dv[J.ref]) !== ref) continue;
+            if (String(dv[J.result]).indexOf(PENDING) === 0 || String(dv[J.result]) === PENDING_REPLACED) setJournalResult_(journal, done[did].row, PENDING_UNDONE, dv);
+            else if (did !== ref && dv[J.result] === 'ok') fixApplied = done[did];
+          }
+          if (!fixApplied) { ev.barcode = Core.normBarcode(orig.vals[J.barcode]); res = 'отменено'; }
+          else orig = fixApplied;              // исправление упаковки уже вписано в строку — отменяем как обычный пик
+        }
+        if (res !== 'отменено' && orig.vals[J.result] !== 'ok') throw new Error('отменять нечего: исходный пик не был применён (' + orig.vals[J.result] + ')');
         var ubc = Core.normBarcode(orig.vals[J.barcode]);
         ev.barcode = ubc;
-        if (lastBy[ubc] && lastBy[ubc].undo && lastBy[ubc].ref === ref) { res = 'уже отменено'; }
+        if (res === 'отменено') { /* отменён ещё не вписанный пик */ }
+        else if (lastBy[ubc] && lastBy[ubc].undo && lastBy[ubc].ref === ref) { res = 'уже отменено'; }
         else {
           // строку ищем заново по штрихкоду: строки могли сдвинуться (сортировка, перенос в архив)
           rowNum = index[ubc];
@@ -577,18 +621,22 @@ function processEvents_(user, device, events) {
         if (code.kind !== 'book') throw new Error('некорректный штрихкод «' + code.code + '»');
         ev.barcode = code.code;
         rowNum = index[code.code];
-        if (!rowNum) throw new Error('штрихкода нет в «' + CFG.BOOKS_SHEET + '»');
+        if (!rowNum && Core.isOurSticker(code.code) && Core.isCell(String(ev.cell || ''))) {
+          res = PENDING; rowNum = '';                         // впишется сам, когда книгу опишут
+        } else if (!rowNum) throw new Error('штрихкода нет в «' + CFG.BOOKS_SHEET + '»');
         if (rowNum === -1) throw new Error('штрихкод встречается в таблице дважды — разберите вручную');
-        var row = readRow(rowNum);
-        prev = row;
         ref = String(ev.fixOf || '');
         if (pkg && pkg.name && !pkg.L) {  // стандартная упаковка по имени
           for (var q = 0; q < packages.length; q++) if (packages[q].name === pkg.name) pkg = packages[q];
         }
-        var a = Core.applyPlace(row, { id: id, ts: String(ev.ts || now), user: user, type: ev.type,
-                                       cell: String(ev.cell || ''), barcode: code.code, pkg: pkg });
-        res = a.result;
-        if (res === 'ok') writeRow_(books, rowNum, C, a.changes);
+        if (res !== PENDING) {
+          var row = readRow(rowNum);
+          prev = row;
+          var a = Core.applyPlace(row, { id: id, ts: String(ev.ts || now), user: user, type: ev.type,
+                                         cell: String(ev.cell || ''), barcode: code.code, pkg: pkg });
+          res = a.result;
+          if (res === 'ok') writeRow_(books, rowNum, C, a.changes);
+        }
       }
     } catch (err) {
       res = 'ошибка: ' + (err.message || err);
@@ -603,10 +651,102 @@ function processEvents_(user, device, events) {
     journal.getRange(journal.getLastRow(), 21).setNumberFormat('@');
     done[id] = { row: journal.getLastRow(), vals: jrow };
     track(jrow);
-    if (res !== 'ok' && res !== 'отменено') errors.appendRow([Core.msk(now), user, id, String(ev.barcode || ''), String(ev.cell || ''), res]);
+    if (res !== 'ok' && res !== 'отменено' && res !== PENDING) errors.appendRow([Core.msk(now), user, id, String(ev.barcode || ''), String(ev.cell || ''), res]);
     out.push({ id: id, result: res });
   });
   return out;
+}
+
+var PENDING_REPLACED = 'заменено более поздним пиком (книга ещё не была описана)';
+var PENDING_UNDONE = 'отменено до описания';
+
+/** Переписать итог отложенного пика в журнале (результат, строка, «было»). */
+function setJournalResult_(journal, jRow, res, vals, rowNum, prev) {
+  prev = prev || {};
+  journal.getRange(jRow, J.result + 1, 1, 9).setValues([[res, rowNum || '', prev.cell || '', prev.article || '', prev.pkg || '',
+    prev.L || '', prev.W || '', prev.H || '', prev.placedAt ? Core.msk(prev.placedAt) : '']]);
+  journal.getRange(jRow, J.prevAt + 1).setNumberFormat('@');
+  journal.getRange(jRow, J.prevBy + 1).setValue(prev.placedBy || '');
+  if (vals) vals[J.result] = res;
+}
+
+/**
+ * Вписать в «Лист1» место книг, которые поставили на полку до описания.
+ * Ищет в журнале пики «ждёт описания»; если строка книги уже появилась — применяет пик как обычный
+ * (с исходным временем скана, кем и упаковкой), и в журнале результат становится «ok».
+ * locked — блокировка уже взята (doPost); иначе берём сами, а если занято — только читаем.
+ * Возвращает {штрихкод: {cell, ts}} книг, которые всё ещё ждут описания.
+ */
+function applyPending_(ss, locked) {
+  var waiting = {};
+  var journal = ss.getSheetByName(CFG.JOURNAL_SHEET);
+  if (!journal || journal.getLastRow() < 2) return waiting;
+  var lock = null;
+  if (!locked) {
+    lock = LockService.getScriptLock();
+    if (!lock.tryLock(5000)) lock = null;
+  }
+  try {
+    var jv = journal.getRange(2, 1, journal.getLastRow() - 1, JOURNAL_HEADER.length).getValues();
+    var pend = [];
+    for (var i = 0; i < jv.length; i++) {
+      if (String(jv[i][J.result]).indexOf(PENDING) !== 0) continue;
+      pend.push({ i: i, bc: Core.normBarcode(jv[i][J.barcode]), ts: jv[i][J.ts], id: String(jv[i][J.id]), ref: String(jv[i][J.ref] || '') });
+    }
+    if (!pend.length) return waiting;
+    var plan = Core.pendingPlan(pend);
+    var canWrite = locked || !!lock;
+    var books = booksSheet_(ss), map = headerMap_(books), C = {};
+    for (var k in CFG.COL) C[k] = need_(map, CFG.COL[k], CFG.BOOKS_SHEET);
+    var last = books.getLastRow(), index = {};
+    var bcol = last > 1 ? books.getRange(2, C.barcode, last - 1, 1).getValues() : [];
+    for (var r = 0; r < bcol.length; r++) {
+      var b = Core.normBarcode(bcol[r][0]);
+      if (b) { if (index[b]) index[b] = -1; else index[b] = r + 2; }
+    }
+    var errors = ss.getSheetByName(CFG.ERRORS_SHEET), now = Core.msk(new Date());
+    pend.forEach(function (p) {
+      var v = jv[p.i], jRow = p.i + 2;
+      if (plan.replaced[p.i]) { if (canWrite) setJournalResult_(journal, jRow, PENDING_REPLACED, v); return; }
+      var rowNum = index[p.bc];
+      if (!rowNum) {
+        waiting[p.bc] = { cell: String(v[J.cell] || ''), ts: Core.msk(v[J.ts]) };
+        var late = Date.now() - Core.toMs(v[J.ts]) > PENDING_DAYS * 86400000;
+        if (late && canWrite && String(v[J.result]) === PENDING) {
+          var why = PENDING + ' — нет в «' + CFG.BOOKS_SHEET + '» больше ' + PENDING_DAYS + ' дней';
+          setJournalResult_(journal, jRow, why, v);
+          if (errors) errors.appendRow([now, String(v[J.user] || ''), p.id, p.bc, String(v[J.cell] || ''),
+            why + ': проверьте наклейку или опишите книгу (место впишется само)']);
+        }
+        return;
+      }
+      if (!canWrite) return;                       // строка есть, но таблица занята — впишем при следующем обращении
+      var res, prev = {};
+      if (rowNum === -1) res = 'ошибка: штрихкод встречается в таблице дважды — разберите вручную';
+      else {
+        var rv = books.getRange(rowNum, 1, 1, books.getLastColumn()).getValues()[0];
+        prev = { cell: rv[C.cell - 1], article: rv[C.article - 1], pkg: rv[C.pkg - 1], L: rv[C.L - 1], W: rv[C.W - 1],
+                 H: rv[C.H - 1], placedAt: rv[C.placedAt - 1], placedBy: rv[C.placedBy - 1] };
+        var pkg = v[J.pkg] ? { name: String(v[J.pkg]), L: v[J.L], W: v[J.W], H: v[J.H] } : null;
+        var a = Core.applyPlace(prev, { id: p.id, ts: v[J.ts], user: String(v[J.user] || ''), type: String(v[J.type] || 'place'),
+                                        cell: String(v[J.cell] || ''), barcode: p.bc, pkg: pkg });
+        res = a.result;
+        if (res === 'ok') writeRow_(books, rowNum, C, a.changes);
+      }
+      setJournalResult_(journal, jRow, res, v, rowNum > 0 ? rowNum : '', prev);
+      if (res !== 'ok' && errors) errors.appendRow([now, String(v[J.user] || ''), p.id, p.bc, String(v[J.cell] || ''),
+        'книгу описали после размещения, но место не вписано: ' + res]);
+    });
+    return waiting;
+  } finally {
+    if (lock) try { lock.releaseLock(); } catch (x) {}
+  }
+}
+
+/** Для запуска вручную из редактора: вписать места книг, которые описали после размещения. */
+function вписатьОтложенные() {
+  var w = applyPending_(ss_(), false);
+  Logger.log('Ещё ждут описания: ' + Object.keys(w).length + (Object.keys(w).length ? ' — ' + Object.keys(w).join(', ') : ''));
 }
 
 function writeRow_(sheet, rowNum, C, ch) {

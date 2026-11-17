@@ -53,12 +53,12 @@ def handle(route, request):
             if e.get('type') in ('place', 'move') and e.get('barcode') in books and books[e['barcode']].get('n'):
                 books[e['barcode']]['c'] = e['cell']
         return route.fulfill(status=200, content_type='application/json',
-                             body=json.dumps({"ok": True, "version": NET["catVersion"], "table": "ТЕСТ OzonBooks", "ver": "2.4", "packages": PK, "books": books}))
+                             body=json.dumps({"ok": True, "version": NET["catVersion"], "table": "ТЕСТ OzonBooks", "ver": NET.get("ver", "2.4"), "packages": PK, "books": books}))
     body = json.loads(request.post_data)
     if NET["tableErr"]:
         return route.fulfill(status=200, content_type='application/json', body=json.dumps({"ok": False, "error": NET["tableErr"]}))
     posted.extend(body['events'])
-    res = [{"id": e["id"], "result": NET["reject"].get(e.get("barcode"), "ok") if e.get("type") != "undo" else "отменено"} for e in body['events']]
+    res = [{"id": e["id"], "result": ("ждёт описания" if e.get("barcode") in NET.get("pend", ()) and e.get("type") != "state" else NET["reject"].get(e.get("barcode"), "ok")) if e.get("type") != "undo" else "отменено"} for e in body['events']]
     posted[:] = [e for e in posted if e.get("barcode") not in NET["reject"]]
     return route.fulfill(status=200, content_type='application/json', body=json.dumps({"ok": True, "results": res}))
 
@@ -426,6 +426,40 @@ with sync_playwright() as p:
     last = [e for e in posted if e.get('type') == 'state' and e['barcode'] == NEWBC][-1]
     check('stains' in last['state']['d'] and last['state']['f'] == 'pocket', 'правка у полки ушла: ' + str(last['state']))
     check(any(e.get('type') == 'place' and e.get('barcode') == NEWBC for e in posted), 'книга размещена')
+
+    # 2.4 / скрипт 2.5: сфотографировали -> фотостол -> полка, а описали потом
+    UND = ean('200000060001')
+    NET["pend"] = {UND}
+    scan('991001002'); page.wait_for_timeout(1600)
+    scan(UND); page.wait_for_timeout(400)
+    check('НЕИЗВЕСТНЫЙ' in st(), 'со скриптом 2.4 неописанная книга — как раньше, красный экран')
+    page.click('#undoBtn'); page.wait_for_timeout(200)
+    page.click('#doneBtn'); page.wait_for_timeout(800)
+    NET["ver"] = "2.5"
+    page.click('#catBtn'); page.wait_for_timeout(800)
+    page.click('#modePhoto'); page.wait_for_timeout(200)
+    scan(UND); page.wait_for_timeout(300)
+    check(page.is_visible('#stateBlock') and 'Новая книга' in st(), 'фотостол: неописанную книгу можно отметить сразу после съёмки')
+    page.locator('#defChips .chip', has_text='Скос блока').click(); page.wait_for_timeout(100)
+    page.click('#bookDone'); page.wait_for_timeout(1800)
+    page.click('#modePlace'); page.wait_for_timeout(200)
+    scan('991001002'); page.wait_for_timeout(1600)
+    scan(UND); page.wait_for_timeout(500)
+    check('ЕЩЁ НЕ ОПИСАНА' in st() and 'С1-П2' in st() and 'НЕИЗВЕСТНЫЙ' not in st(), 'полка: неописанная книга ставится без красного экрана: ' + st().replace('\n', ' | '))
+    check('скос блока' in page.inner_text('#stateBlock').lower(), 'у полки видны отметки фотостола')
+    page.click('#bookDone'); page.wait_for_timeout(300)
+    check('ВЫБЕРИТЕ УПАКОВКУ' in st(), 'упаковку выбирают как обычно')
+    page.locator('#pkgGrid button', has_text='Разв·5').click(); page.wait_for_timeout(150)
+    page.click('#bookDone'); page.wait_for_timeout(2500)
+    pe = [e for e in posted if e.get('type') == 'place' and e.get('barcode') == UND]
+    check('ЗАПИСАНА · С1-П2' in st() and len(pe) == 1 and pe[0]['pkg']['name'] == 'Развертка - 5 см.', 'пик ушёл с ячейкой и упаковкой: ' + str(pe))
+    check(any(e.get('type') == 'state' and e['barcode'] == UND and e['state']['d'] == ['skew'] for e in posted), 'отметка фотостола ушла в таблицу (книга ещё не описана): ' + str([e.get('state') for e in posted if e.get('barcode') == UND]))
+    check(page.evaluate(f"!Object.values(S.rejected).some(x => /описан/.test(x.why)) && !S.problems.some(p => p.includes('{UND}'))"), '«ждёт описания» — не отказ')
+    page.wait_for_timeout(1600)
+    scan(UND); page.wait_for_timeout(300)
+    check('УЖЕ ПИКНУТА' in st(), 'повторный пик неописанной книги на той же полке не задваивается')
+    page.click('#catBtn'); page.wait_for_timeout(800)
+    check(page.evaluate(f"!!(S.catalog['{UND}'] && S.catalog['{UND}'].c === 'С1-П2')"), 'после обновления справочника телефон помнит, где стоит неописанная книга')
 
     page.screenshot(path='/tmp/razm_e2e.png')
     check(not errors, 'нет ошибок JavaScript ' + (str(errors) if errors else ''))

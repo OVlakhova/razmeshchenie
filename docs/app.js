@@ -4,8 +4,8 @@
 
 const API = window.RAZM_API ||
   'https://script.google.com/macros/s/AKfycbxzKklN_XquWi7e9ZKml2iGv7lnRI_gpab86hkXPs7SxT-FT3N4hD2cqfMTwvAksUxyPw/exec';
-const APP_VERSION = '2.3';
-const NEED_SCRIPT = '2.4';                   // скрипт старше — в Меню подсказка обновить развертывание
+const APP_VERSION = '2.4';
+const NEED_SCRIPT = '2.5';                   // скрипт старше — в Меню подсказка обновить развертывание
 const ORDERS_EVERY_MS = 3 * 60 * 1000;      // вкладка «Заказы» открыта — обновлять раз в 3 минуты
 const CATALOG_EVERY_MS = 10 * 60 * 1000;     // пока приложение открыто — обновлять справочник раз в 10 минут
 const CATALOG_STALE_MS = 30 * 60 * 1000;     // старше — кнопка «Справочник» жёлтая
@@ -152,6 +152,7 @@ async function fetchCatalog() {
     const j = await api('GET', { action: 'catalog' });
     S.catalog = j.books || {}; S.packages = j.packages || []; S.catalogAt = j.version || new Date().toISOString();
     S.states = j.states || {};
+    nameUndescribed();
     await overlayQueue();
     await DB.set('catalog', { books: S.catalog, packages: S.packages, at: S.catalogAt, table: S.table, states: S.states });
     netOk(); renderPackages(); renderTop(); renderOrders();
@@ -173,7 +174,7 @@ async function sync() {
     const j = await api('POST', {}, { events: batch });
     let refused = false;
     for (const r of j.results || []) {
-      if (!['ok', 'уже получено', 'отменено', 'уже отменено'].includes(r.result)) {
+      if (!['ok', 'уже получено', 'отменено', 'уже отменено', 'ждёт описания'].includes(r.result)) {
         const ev = batch.find(e => e.id === r.id) || {};
         const title = ev.title || (S.catalog[ev.barcode] || {}).t || ev.barcode || '';
         if (ev.barcode && S.recent[ev.barcode]) delete S.recent[ev.barcode];
@@ -217,11 +218,24 @@ async function overlayQueue() {
   const now = Date.now();
   for (const b in S.recent) {
     if (now - S.recent[b].at > RECENT_MS) { delete S.recent[b]; continue; }
+    if (!S.catalog[b] && S.recent[b].cell && isOurSticker(b)) S.catalog[b] = pendBook(b, S.recent[b].cell);   // ещё не дошло до таблицы
     if (S.catalog[b]) S.catalog[b].c = S.recent[b].cell;
+    if (S.catalog[b] && S.catalog[b].pend && !S.catalog[b].c) delete S.catalog[b];                       // отменили до описания
   }
   (await DB.qAll()).sort((a, b) => a.seq - b.seq).forEach(ev => {
-    if (ev.type !== 'undo' && ev.barcode && S.catalog[ev.barcode]) S.catalog[ev.barcode].c = ev.cell;
+    if (ev.type === 'undo' || !ev.barcode) return;
+    if (!S.catalog[ev.barcode] && ev.cell && isOurSticker(ev.barcode)) S.catalog[ev.barcode] = pendBook(ev.barcode, ev.cell);
+    if (S.catalog[ev.barcode]) S.catalog[ev.barcode].c = ev.cell;
   });
+}
+
+// Книга с нашей наклейкой, которой ещё нет в таблице (сфотографировали, но не описали): ставить можно,
+// место запомнит скрипт и впишет само, когда книгу опишут (скрипт 2.5+).
+const isOurSticker = c => /^200\d{10}$/.test(c) && Codes.ean13ok(c);
+const canPlaceUndescribed = () => !!S.scriptVer && !verLess(S.scriptVer, '2.5');
+function pendBook(bc, cell) { return { t: 'Ещё не описана · ' + bc, a: '', s: {}, n: 1, q: 1, c: cell || '', ar: '', pend: 1 }; }
+function nameUndescribed() {
+  for (const bc in S.catalog) { const b = S.catalog[bc]; if (b.pend && !b.t) b.t = 'Ещё не описана · ' + bc; }
 }
 
 async function remember(barcode, cell) {
@@ -298,6 +312,12 @@ async function handleScan(code) {
     S.busy = false; renderTop();
     return handleScan(Object.assign({}, code, { recheck: true }));
   }
+  if (!book && isOurSticker(code.code) && canPlaceUndescribed()) {
+    // сфотографировали, но ещё не описали — ставим как обычно, место впишется само после описания
+    const nb = S.catalog[code.code] = pendBook(code.code, '');
+    await startCurrent(code, nb, 'place', '');
+    return true;
+  }
   if (!book) {
     S.pendingUnknown = code.code;
     beep('bad');
@@ -349,6 +369,10 @@ async function startCurrent(code, book, type, warn) {
   if (q > 1) { lbl = `ЭКЗЕМПЛЯР ${n} ИЗ ${q}`; kind = 'info'; meta = n < q ? `Пикните ещё ${q - n} — они должны стоять здесь же` : 'Все экземпляры на месте'; }
   if (n > q) { lbl = `ЭКЗЕМПЛЯР ${n}, А В ТАБЛИЦЕ ${q}`; kind = 'warn'; }
   if (type === 'move') { lbl = 'ПЕРЕМЕЩЕНИЕ · ' + S.cell; kind = 'warn'; }
+  if (book.pend) {
+    lbl = (type === 'move' ? 'ПЕРЕМЕЩЕНИЕ · ' : 'ЕЩЁ НЕ ОПИСАНА · ') + S.cell; kind = 'info';
+    meta = 'Место запомнено — впишется в таблицу само, когда книгу опишут';
+  }
   beep(needsPkg || warn ? 'warn' : 'ok');
   const pre = stateOf(code.code);
   show(kind, lbl, '', book.t, meta, needsPkg ? 'Выберите упаковку' : (warn || (isPlainState(pre) ? '' : 'С фотостола: ' + stateSummary(pre))));
@@ -497,6 +521,7 @@ function showFind(code) {
   if (code.kind !== 'book') return;
   const b = S.catalog[code.code];
   if (!b) { beep('bad'); return show('bad', 'НЕ НАЙДЕНА', '', code.code, 'Нет ни в таблице, ни в архиве, ни в 1С'); }
+  if (b.pend) { beep('ok'); return show('info', 'ВЕРНУТЬ НА', b.c, b.t, 'Книга ещё не описана', 'Место запомнено при размещении — в таблицу впишется после описания'); }
   const place = b.c || b.s['1c'] || b.s.arch || '';
   const srcs = [];
   if (b.c) srcs.push('таблица: ' + b.c);
